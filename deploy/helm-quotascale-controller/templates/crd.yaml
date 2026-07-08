@@ -1,0 +1,150 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: quotaautoscalers.dcn.ssu.ac.kr
+spec:
+  group: dcn.ssu.ac.kr
+  names:
+    kind: QuotaAutoscaler
+    listKind: QuotaAutoscalerList
+    plural: quotaautoscalers
+    shortNames:
+      - qa
+    singular: quotaautoscaler
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - description: |-
+            CreationTimestamp is a timestamp representing the server time when this object was created. It is not guaranteed to be set in happens-before order across separate operations. Clients may not set this value. It is represented in RFC3339 form and is in UTC.
+            Populated by the system. Read-only. Null for lists. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#metadata
+          jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - resourceQuota
+              properties:
+                resourceQuota:
+                  type: string
+                  description: Name of the ResourceQuota in your namespace
+                min.cpu:
+                  type: string
+                  description: Minimal CPU the Autoscaler can set for a quota
+                max.cpu:
+                  type: string
+                  description: Maximal CPU the Autoscaler can set for a quota
+                min.memory:
+                  type: string
+                max.memory:
+                  type: string
+                behavior:
+                  type: object
+                  properties:
+                    scaleUp:
+                      type: object
+                      properties:
+                        policies:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - method
+                              - value
+                            properties:
+                              method:
+                                type: string
+                              value:
+                                type: integer
+                              targetUtilization:
+                                type: integer
+                                minimum: 1
+                                maximum: 100
+                                description: Desired ResourceQuota usage percentage after scaling. Defaults to value when omitted.
+                        selectPolicy:
+                          type: string
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodescalinginventories.dcn.ssu.ac.kr
+spec:
+  group: dcn.ssu.ac.kr
+  names:
+    kind: NodeScalingInventory
+    listKind: NodeScalingInventoryList
+    plural: nodescalinginventories
+    shortNames:
+      - nsi
+    singular: nodescalinginventory
+  scope: Cluster
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .spec.machineDeploymentReplicas
+          name: Replicas
+          type: integer
+        - jsonPath: .spec.nodes[*].name
+          name: Nodes
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                machineDeploymentReplicas:
+                  type: integer
+                  format: int32
+                  description: Current desired MachineDeployment replica count from feature/node-scaling/md.yaml
+                nodes:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - order
+                      - used
+                    properties:
+                      name:
+                        type: string
+                      order:
+                        type: integer
+                        format: int32
+                      used:
+                        type: boolean
+                    scaleDown:
+                      type: object
+                      properties:
+                        policies:
+                          type: array
+                          items:
+                            type: object
+                            required:
+                              - method
+                              - value
+                            properties:
+                              method:
+                                type: string
+                              value:
+                                type: integer
+                              targetUtilization:
+                                type: integer
+                                minimum: 1
+                                maximum: 100
+                                description: Desired ResourceQuota usage percentage after scaling. Defaults to value when omitted.
+                        selectPolicy:
+                          type: string

@@ -1,0 +1,379 @@
+package quota
+
+// This file contains functions that take namespaced ResourceQuota and QuotaAutoscaler events and turn
+// them into behaviour which can invoke the resize API. Event watching is the responsibility of the
+// calling function, this also includes stream resets.
+//
+// Example usage:
+//  quotas, _ := core.ResourceQuotas("").Watch(context.TODO(), v1.ListOptions{})
+//  scalers, _ := ichp.QuotaAutoscalers("").Watch(context.TODO(), v1.ListOptions{})
+//  events, _ := client.CoreV1().Events("").Watch(context.TODO(), v1.ListOptions{})
+//
+//  // This is a blocking call, until either watcher channel terminates
+//  internal.WatchQuotas(client, startScalers, quotas.ResultChan(), scalers.ResultChan(), events.ResultChan(), cmEvents.ResultChan(), time.Minute)
+//
+//	quotas.Stop()
+//  scalers.Stop()
+//  events.Stop()
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	_ "net/http/pprof"
+	"strings"
+	"time"
+
+	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
+	"github.com/SSU-DCN/quotascale-controller/internal/resize"
+	"github.com/SSU-DCN/quotascale-controller/pkg/logging"
+	"github.com/SSU-DCN/quotascale-controller/pkg/resources"
+	v14 "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/apis/quotaautoscaler/v1"
+	v12 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	v13 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
+)
+
+type QuotaController struct {
+	client                 kubernetes.Interface
+	quotaCheckInterval     time.Duration
+	scaleOutRequestHandler nodescaling.ScaleOutRequestHandler
+}
+
+// QuotaWatcher internally manages a list of QuotaAutoscalers and ResourceQuotas.
+type QuotaWatcher struct {
+	Scalers map[string]v14.QuotaAutoscaler
+	Quotas  map[string]v12.ResourceQuota
+	Events  map[string][]v12.Event
+
+	Client                 kubernetes.Interface
+	ScaleOutRequestHandler nodescaling.ScaleOutRequestHandler
+}
+
+func NewQuotaController(client kubernetes.Interface, quotaCheckInterval time.Duration, scaleOutRequestHandler nodescaling.ScaleOutRequestHandler) *QuotaController {
+	if quotaCheckInterval <= 0 {
+		quotaCheckInterval = time.Minute
+	}
+	return &QuotaController{
+		client:                 client,
+		quotaCheckInterval:     quotaCheckInterval,
+		scaleOutRequestHandler: scaleOutRequestHandler,
+	}
+}
+
+// Run listens to namespaced ResourceQuotas and QuotaAutoscalers. When both are known for a namespace
+// the required behaviour is calculated. If scaling is required, following the behavior, the resize API is
+// invoked. This is a blocking call until either channel terminates.
+func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event, cmEvents <-chan watch.Event) {
+	watcher := &QuotaWatcher{
+		Scalers:                map[string]v14.QuotaAutoscaler{},
+		Quotas:                 map[string]v12.ResourceQuota{},
+		Events:                 map[string][]v12.Event{},
+		Client:                 controller.client,
+		ScaleOutRequestHandler: controller.scaleOutRequestHandler,
+	}
+
+	// Init scaler state so that we know which ResourceQuotas to couple. The Scaler has a field with the
+	// resource name of the ResourceQuota object, so we cannot store ResourceQuota objects until we know
+	// the scaler spec. After registering the Scalers we will get the ResourceQuotas in the event stream.
+	for _, nsScaler := range startScalers {
+		watcher.Scalers[nsScaler.Namespace] = nsScaler
+	}
+	startQuotas, _ := controller.client.CoreV1().ResourceQuotas("").List(context.TODO(), v13.ListOptions{})
+	for _, startQuota := range startQuotas.Items {
+		scaler, ok := watcher.Scalers[startQuota.Namespace]
+		if ok && scaler.Spec.ResourceQuota == startQuota.Name {
+			watcher.Quotas[startQuota.Namespace] = startQuota
+		}
+	}
+
+	// Ticker aggregates Namespace and ResourceQuota events
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	quotaCheckTicker := time.NewTicker(controller.quotaCheckInterval)
+	defer quotaCheckTicker.Stop()
+
+	for {
+		select {
+		case event, ok := <-quotas:
+			// Quota Changes are very frequent, every Pod "modifies" the Quota status twice.
+			// To be a bit more friendly during a scale down we let ticker aggregate Quota
+			// events. For most cases this will suffice. The ideal implementation would be to
+			// aggregate a few seconds after the first ResourceQuota event per unique namespace.
+			if !ok {
+				return
+			}
+			ns := watcher.RegisterQuotaEvent(event)
+			if ns != "" {
+				logging.LogDebug("[%s] QuotaEvent", ns)
+				if _, ok := watcher.Events[ns]; !ok {
+					watcher.Events[ns] = []v12.Event{}
+					// We let the ticker aggregate events
+				}
+			}
+		case event, ok := <-scalers:
+			if !ok {
+				return
+			}
+			ns := watcher.RegisterScalerEvent(event)
+			if ns != "" {
+				logging.LogDebug("[%s] ScalerEvent", ns)
+				watcher.UpdateNs(ns, false)
+			}
+
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			ns, immediate := watcher.RegisterNamespacedEvent(event)
+			if ns != "" {
+				logging.LogDebug("[%s] PodEvent", ns)
+				if immediate {
+					logging.LogInfo("[%s] Quota denied event detected, triggering immediate quota evaluation", ns)
+					watcher.UpdateNs(ns, true)
+					delete(watcher.Events, ns)
+				}
+			}
+			// Non-quota-denied events are still aggregated by the ticker.
+
+		// cert-manager events will also be handled by the function RegisterNamespacedEvent
+		case cmEvent, ok := <-cmEvents:
+			if !ok {
+				return
+			}
+			ns, immediate := watcher.RegisterNamespacedEvent(cmEvent)
+			if ns != "" {
+				logging.LogDebug("[%s] CertManagerEvent", ns)
+				if immediate {
+					logging.LogInfo("[%s] Quota denied cert-manager event detected, triggering immediate quota evaluation", ns)
+					watcher.UpdateNs(ns, true)
+					delete(watcher.Events, ns)
+				}
+			}
+			// Non-quota-denied events are still aggregated by the ticker.
+
+		case <-ticker.C:
+			for ns := range watcher.Events {
+				logging.LogDebug("[%s] Ticker", ns)
+				watcher.UpdateNs(ns, true) // New expensive, as reading events will read ReplicaSets, etc
+				delete(watcher.Events, ns)
+			}
+		case <-quotaCheckTicker.C:
+			watcher.CheckQuotasPeriodically()
+		}
+	}
+}
+
+// WatchQuotas is kept as a compatibility wrapper around QuotaController.
+func WatchQuotas(client kubernetes.Interface, startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event, cmEvents <-chan watch.Event, quotaCheckInterval time.Duration) {
+	NewQuotaController(client, quotaCheckInterval, nil).Run(startScalers, quotas, scalers, events, cmEvents)
+}
+
+func (watcher *QuotaWatcher) CheckQuotasPeriodically() {
+	for namespace, scaler := range watcher.Scalers {
+		if err := watcher.RegisterMissingResourceQuota(namespace, scaler.Spec.ResourceQuota); err != nil {
+			continue
+		}
+
+		logging.LogDebug("[%s] Periodic quota utilization check", namespace)
+		watcher.UpdateNs(namespace, false)
+	}
+}
+
+func (watcher *QuotaWatcher) UpdateNs(namespace string, readEvents bool) {
+	scaler, scalerOk := watcher.Scalers[namespace]
+	quota, quotaOk := watcher.Quotas[namespace]
+	var events []v12.Event
+	if readEvents {
+		events = watcher.Events[namespace]
+	}
+	logging.LogDebug("[%s] Checking Quota Updates (Found Scaler: %t Quota: %t Events %d (%t) ", namespace, scalerOk, quotaOk, len(events), readEvents)
+
+	if scalerOk && quotaOk {
+		go func() {
+			err := watcher.UpdateQuotaIfRequired(quota, scaler, events)
+			if err != nil {
+				logging.LogError("[%s] Failed to update quota for: %s", namespace, err.Error())
+			}
+		}()
+	}
+}
+
+// RegisterScalerEvent stores a QuotaAutoscaler in watcher, or deletes it.
+func (watcher *QuotaWatcher) RegisterScalerEvent(event watch.Event) string {
+	scaler := event.Object.(*v14.QuotaAutoscaler)
+
+	if event.Type == watch.Deleted {
+		delete(watcher.Scalers, scaler.Namespace)
+		return ""
+	}
+
+	watcher.Scalers[scaler.Namespace] = *scaler
+	if _, ok := watcher.Quotas[scaler.Namespace]; !ok {
+		_ = watcher.RegisterMissingResourceQuota(scaler.Namespace, scaler.Spec.ResourceQuota) // A bit slow, but needed
+	}
+	return scaler.Namespace
+}
+
+// RegisterQuotaEvent stores a ResourceQuota in watcher, or deletes it.
+func (watcher *QuotaWatcher) RegisterQuotaEvent(event watch.Event) string {
+	quota := event.Object.(*v12.ResourceQuota)
+
+	// Get QuotaAutoscaler to see event Quota is a target
+	scaler, ok := watcher.Scalers[quota.Namespace]
+	if ok && scaler.Spec.ResourceQuota == quota.Name {
+
+		if event.Type == watch.Deleted {
+			delete(watcher.Quotas, quota.Namespace)
+			return ""
+		}
+
+		watcher.Quotas[quota.Namespace] = *quota
+		return quota.Namespace
+	}
+
+	return ""
+}
+
+// RegisterMissingResourceQuota fetches the given quota and stores it in the watcher. Does not consume Lock, so
+// it must be called when holding the (Mutex) Lock.
+func (watcher *QuotaWatcher) RegisterMissingResourceQuota(namespace, quotaName string) error {
+	logging.LogInfo("[%s] Registering missing ResourceQuota: %s", namespace, quotaName)
+	quota, err := watcher.Client.CoreV1().ResourceQuotas(namespace).Get(context.TODO(), quotaName, v13.GetOptions{})
+	if err == nil {
+		watcher.Quotas[namespace] = *quota // Register
+	} else {
+		logging.LogError("[%s] Failed to register ResourceQuota %s: %v", namespace, quotaName, err)
+	}
+
+	return err
+}
+
+// RegisterNamespacedEvent stores namespaced Events in watcher. Should be cleaned up by aggregate loop
+// every iteration (events should be consumed once). This function does not delete any stored events.
+// The returned boolean indicates whether quota scaling should run immediately.
+func (watcher *QuotaWatcher) RegisterNamespacedEvent(event watch.Event) (string, bool) {
+	ev := event.Object.(*v12.Event)
+	target := ev.InvolvedObject
+
+	if _, ok := watcher.Events[target.Namespace]; !ok {
+		watcher.Events[target.Namespace] = []v12.Event{*ev}
+	} else {
+		watcher.Events[target.Namespace] = append(watcher.Events[target.Namespace], *ev)
+	}
+
+	return ev.Namespace, IsImmediateQuotaDeniedEvent(ev)
+}
+
+func IsImmediateQuotaDeniedEvent(ev *v12.Event) bool {
+	if ev == nil {
+		return false
+	}
+
+	switch ev.Reason {
+	case "FailedCreate", "PresentError":
+	default:
+		return false
+	}
+
+	message := strings.ToLower(ev.Message)
+	return strings.Contains(message, "exceeded quota") ||
+		strings.Contains(message, "is forbidden") && strings.Contains(message, "quota") ||
+		strings.Contains(message, "quota") && strings.Contains(message, "denied")
+}
+
+func ResourceQuotaUsedMemoryLimit(quota *v12.ResourceQuota) *resource.Quantity {
+	memLimit, ok := quota.Status.Used["limits.memory"]
+	if !ok {
+		return quota.Status.Used.Memory()
+	}
+	return &memLimit
+}
+
+func ResourceQuotaUsedCpuLimit(quota *v12.ResourceQuota) *resource.Quantity {
+	cpuLimit, ok := quota.Status.Used["limits.cpu"]
+	if !ok {
+		return quota.Status.Used.Cpu()
+	}
+	return &cpuLimit
+}
+
+func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scaler v14.QuotaAutoscaler, events []v12.Event) error {
+	validatedScaler := ValidateQuotaScaler(&scaler)
+	desired := &resources.Resources{
+		Cpu:    quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
+		Memory: quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
+	}
+
+	if quota.Status.Used == nil || quota.Status.Hard == nil {
+		return errors.New("quota status is nil")
+	}
+
+	// Take CPU limits into account when limits are higher than requests.
+	quota.Status.Used[v12.ResourceCPU] = MaxResourceQuantity(quota.Status.Used.Cpu(), ResourceQuotaUsedCpuLimit(&quota))
+
+	for _, policy := range scaler.Spec.Behavior.ScaleDown.Policies {
+		desired.Replace(validatedScaler.ActivateScalerPolicy(policy, &quota, false))
+	}
+	logging.LogDebug("[%s] Desired resources after ScaleDown: %+v\n", scaler.Namespace, desired)
+	for _, policy := range scaler.Spec.Behavior.ScaleUp.Policies {
+		desired.Replace(validatedScaler.ActivateScalerPolicy(policy, &quota, true))
+	}
+	logging.LogDebug("[%s] Desired resources after ScaleUp: %+v\n", scaler.Namespace, desired)
+
+	if events != nil {
+		if sum, _ := GetResourcesFromPodEvents(watcher.Client, events); sum != nil && !sum.IsEmpty() { // This is a slow call!
+			logging.LogInfo("[%s] Namespace events require an extra %+v resources\n", scaler.Namespace, sum)
+			desired = (&resources.Resources{
+				Cpu:    quota.Status.Used.Cpu().ScaledValue(resource.Milli),
+				Memory: ResourceQuotaUsedMemoryLimit(&quota).ScaledValue(resource.Mega),
+			}).Add(sum).Max(desired)
+		}
+	}
+
+	// We don't do anything with Storage
+	storage := quota.Spec.Hard["requests.storage"]
+
+	// Make sure desired quota is within bounds
+	validatedScaler.ForceLimitToDefaultMax()
+	desired.Max(&resources.Resources{Cpu: validatedScaler.MinCpu, Memory: validatedScaler.MinMemory})
+	desired.Limit(&resources.Resources{Cpu: validatedScaler.MaxCpu, Memory: validatedScaler.MaxMemory})
+	desired.Storage = storage.ScaledValue(resource.Giga)
+
+	current := resources.Resources{
+		Cpu:     quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
+		Memory:  quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
+		Storage: storage.ScaledValue(resource.Giga),
+	}
+	logging.LogInfo("[%s] Calculated desired resources (%+v -> %+v) for namespace %s\n", quota.Namespace, current, desired, scaler.Namespace)
+	desired.ForceNoScaleDownWhenScaleUp(&quota)
+	if desired.DiffersFrom(&quota) {
+		if err := EnsureScaleUpFitsCluster(watcher.Client, current, *desired); err != nil {
+			if watcher.ScaleOutRequestHandler != nil && !desired.IsScaleDown(&quota) {
+				handleErr := watcher.ScaleOutRequestHandler.HandleScaleOutRequest(nodescaling.ScaleOutRequest{
+					Namespace: quota.Namespace,
+					Current:   current,
+					Desired:   *desired,
+					Reason:    err.Error(),
+				})
+				if handleErr != nil {
+					return handleErr
+				}
+
+				if recheckErr := EnsureScaleUpFitsCluster(watcher.Client, current, *desired); recheckErr != nil {
+					return fmt.Errorf("node scale-out completed but desired quota is still unavailable: %w", recheckErr)
+				}
+			}
+			if watcher.ScaleOutRequestHandler == nil || desired.IsScaleDown(&quota) {
+				return err
+			}
+		}
+
+		logging.LogDebug("[%s] InvokeResizeApiAsync", quota.Namespace)
+		resize.InvokeResizeApiAsync(quota.Namespace, scaler.Spec.ResourceQuota, current, *desired)
+	}
+
+	return nil
+}

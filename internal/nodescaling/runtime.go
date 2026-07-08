@@ -1,0 +1,272 @@
+package nodescaling
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/SSU-DCN/quotascale-controller/pkg/logging"
+	"gopkg.in/yaml.v2"
+)
+
+const (
+	defaultNodeScalingRepoDir = "quotascale-controller-node-scaling"
+	defaultNodeScalingBranch  = "main"
+	defaultNodeScalingFile    = "feature/node-scaling/md.yaml"
+)
+
+type NodeScalingConfig struct {
+	Enabled      bool
+	RepoURL      string
+	RepoBranch   string
+	RepoFilePath string
+	Username     string
+	Password     string
+}
+
+type NodeScalingRuntime struct {
+	Config  NodeScalingConfig
+	RepoDir string
+}
+
+type MachineDeploymentManifest struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Spec       struct {
+		Replicas *int32 `yaml:"replicas"`
+	} `yaml:"spec"`
+}
+
+var nodeScalingRuntime *NodeScalingRuntime
+
+func InitializeNodeScaling(enabled bool) (*NodeScalingRuntime, error) {
+	if !enabled {
+		nodeScalingRuntime = nil
+		return nil, nil
+	}
+
+	cfg, err := LoadNodeScalingConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
+	runtime := &NodeScalingRuntime{
+		Config:  cfg,
+		RepoDir: filepath.Join(os.TempDir(), defaultNodeScalingRepoDir),
+	}
+	if err := runtime.SyncRepo(); err != nil {
+		return nil, err
+	}
+
+	nodeScalingRuntime = runtime
+	return runtime, nil
+}
+
+func LoadNodeScalingConfigFromEnv() (NodeScalingConfig, error) {
+	cfg := NodeScalingConfig{
+		Enabled:      true,
+		RepoURL:      os.Getenv("GITEA_REPO_URL"),
+		RepoBranch:   os.Getenv("GITEA_REPO_BRANCH"),
+		RepoFilePath: os.Getenv("GITEA_REPO_FILE_PATH"),
+		Username:     os.Getenv("GITEA_USERNAME"),
+		Password:     os.Getenv("GITEA_PASSWORD"),
+	}
+	if cfg.RepoBranch == "" {
+		cfg.RepoBranch = defaultNodeScalingBranch
+	}
+	if cfg.RepoFilePath == "" {
+		cfg.RepoFilePath = defaultNodeScalingFile
+	}
+
+	switch {
+	case cfg.RepoURL == "":
+		return cfg, errors.New("node scaling enabled but GITEA_REPO_URL is not set")
+	case cfg.Username == "":
+		return cfg, errors.New("node scaling enabled but GITEA_USERNAME is not set")
+	case cfg.Password == "":
+		return cfg, errors.New("node scaling enabled but GITEA_PASSWORD is not set")
+	}
+
+	return cfg, nil
+}
+
+func GetNodeScalingRuntime() *NodeScalingRuntime {
+	return nodeScalingRuntime
+}
+
+func (runtime *NodeScalingRuntime) SyncRepo() error {
+	if err := os.MkdirAll(filepath.Dir(runtime.RepoDir), 0o755); err != nil {
+		return err
+	}
+
+	if _, err := os.Stat(filepath.Join(runtime.RepoDir, ".git")); err == nil {
+		return runtime.pullRepo()
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	if _, err := os.Stat(runtime.RepoDir); err == nil {
+		if err := os.RemoveAll(runtime.RepoDir); err != nil {
+			return err
+		}
+	}
+
+	return runtime.cloneRepo()
+}
+
+func (runtime *NodeScalingRuntime) cloneRepo() error {
+	logging.LogInfo("Cloning node scaling repo %s into %s", runtime.Config.RepoURL, runtime.RepoDir)
+	_, err := git.PlainClone(runtime.RepoDir, false, &git.CloneOptions{
+		URL:           runtime.Config.RepoURL,
+		Auth:          runtime.auth(),
+		ReferenceName: plumbing.NewBranchReferenceName(runtime.Config.RepoBranch),
+		SingleBranch:  true,
+		Depth:         1,
+		Progress:      os.Stdout,
+	})
+	return err
+}
+
+func (runtime *NodeScalingRuntime) pullRepo() error {
+	logging.LogInfo("Pulling node scaling repo %s in %s", runtime.Config.RepoURL, runtime.RepoDir)
+	repo, err := git.PlainOpen(runtime.RepoDir)
+	if err != nil {
+		return err
+	}
+
+	if err := runtime.ensureRemoteURL(repo); err != nil {
+		return err
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return err
+	}
+
+	err = worktree.Pull(&git.PullOptions{
+		RemoteName:    "origin",
+		Auth:          runtime.auth(),
+		ReferenceName: plumbing.NewBranchReferenceName(runtime.Config.RepoBranch),
+		SingleBranch:  true,
+		Force:         true,
+	})
+	if err == git.NoErrAlreadyUpToDate {
+		return nil
+	}
+	return err
+}
+
+func (runtime *NodeScalingRuntime) ensureRemoteURL(repo *git.Repository) error {
+	remote, err := repo.Remote("origin")
+	if err != nil {
+		return err
+	}
+
+	if len(remote.Config().URLs) > 0 && remote.Config().URLs[0] == runtime.Config.RepoURL {
+		return nil
+	}
+
+	if err := repo.DeleteRemote("origin"); err != nil {
+		return err
+	}
+
+	_, err = repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{runtime.Config.RepoURL},
+	})
+	return err
+}
+
+func (runtime *NodeScalingRuntime) auth() transport.AuthMethod {
+	if runtime.Config.Username == "" && runtime.Config.Password == "" {
+		return nil
+	}
+
+	return &http.BasicAuth{
+		Username: runtime.Config.Username,
+		Password: runtime.Config.Password,
+	}
+}
+
+func (runtime *NodeScalingRuntime) CommitAndPush(message string) error {
+	repo, err := git.PlainOpen(runtime.RepoDir)
+	if err != nil {
+		return err
+	}
+
+	worktree, err := repo.Worktree()
+	if err != nil {
+		return err
+	}
+
+	if _, err := worktree.Add(runtime.MachineDeploymentFilePath()); err != nil {
+		return err
+	}
+
+	if _, err := worktree.Commit(message, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  runtime.Config.Username,
+			Email: fmt.Sprintf("%s@gitea.local", runtime.Config.Username),
+		},
+	}); err != nil {
+		return err
+	}
+
+	return repo.Push(&git.PushOptions{
+		Auth: runtime.auth(),
+	})
+}
+
+func (runtime *NodeScalingRuntime) MachineDeploymentFilePath() string {
+	return runtime.Config.RepoFilePath
+}
+
+func (runtime *NodeScalingRuntime) MachineDeploymentAbsolutePath() string {
+	return filepath.Join(runtime.RepoDir, runtime.MachineDeploymentFilePath())
+}
+
+func (runtime *NodeScalingRuntime) ReadMachineDeployment() (*MachineDeploymentManifest, error) {
+	content, err := os.ReadFile(runtime.MachineDeploymentAbsolutePath())
+	if err != nil {
+		return nil, err
+	}
+
+	var manifest MachineDeploymentManifest
+	if err := yaml.Unmarshal(content, &manifest); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func (runtime *NodeScalingRuntime) ReadMachineDeploymentReplicas() (int32, error) {
+	manifest, err := runtime.ReadMachineDeployment()
+	if err != nil {
+		return 0, err
+	}
+	if manifest.Spec.Replicas == nil {
+		return 0, errors.New("machine deployment spec.replicas is missing")
+	}
+	return *manifest.Spec.Replicas, nil
+}
+
+func (runtime *NodeScalingRuntime) WriteMachineDeploymentReplicas(replicas int32) error {
+	manifest, err := runtime.ReadMachineDeployment()
+	if err != nil {
+		return err
+	}
+
+	manifest.Spec.Replicas = &replicas
+	content, err := yaml.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(runtime.MachineDeploymentAbsolutePath(), content, 0o644)
+}
