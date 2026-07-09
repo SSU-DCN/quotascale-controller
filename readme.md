@@ -4,6 +4,8 @@ QuotaScale Controller is a Kubernetes controller that automatically adjusts name
 
 When node scaling is enabled, the controller also coordinates a second control loop for scaling-dedicated nodes through GitOps.
 
+For the end-to-end demo manifests and Locust traffic replay setup, see [example/test/README.md](example/test/README.md).
+
 ## What this project does
 
 - Automatically scales `ResourceQuota` `requests.cpu`, `limits.cpu`, `requests.memory`, and `limits.memory`
@@ -31,6 +33,7 @@ Its responsibilities are:
 - enforce `min.cpu`, `max.cpu`, `min.memory`, `max.memory`
 - call the resize worker when quota should change
 - request node scale-out first when desired quota does not fit current worker-node capacity
+- ignore stale quota-denied events that happened before the current controller process started
 
 ### Resize worker
 
@@ -44,10 +47,11 @@ The node scaling controller is optional and is enabled with `--enable-node-scali
 
 Its responsibilities are:
 
-- maintain an inventory of scaling-related nodes
+- maintain a `NodeScalingInventory` that reflects observed scaling nodes plus desired `MachineDeployment` replicas
 - activate a reserved scaling node when quota scale-out needs more cluster capacity
 - update a Git-managed `MachineDeployment` replica count
-- evaluate automatic scale-in after managed quota totals fit without scaling nodes for a configured delay
+- evaluate automatic scale-in after managed quota totals fit without scaling-tainted nodes for a configured delay
+- reserve multiple scale-in candidates concurrently and reuse lower-order candidates first when a new scale-out arrives
 
 ## Custom resources
 
@@ -124,7 +128,7 @@ Scaling behavior example:
 Purpose:
 
 - record the desired `MachineDeployment` replica count used for scaling nodes
-- track scaling-related nodes and their usage state
+- track observed scaling-related nodes and their usage state
 
 Key spec fields:
 
@@ -135,6 +139,7 @@ Key spec fields:
   - `used`
 
 This CRD is used internally by the node scaling controller.
+The `nodes[]` list is rebuilt from actually observed scaling nodes, while preserving per-node `order` and `used` state for nodes that still exist.
 
 ## How quota scaling works
 
@@ -149,6 +154,13 @@ This CRD is used internally by the node scaling controller.
 
 The current implementation manages CPU and memory only.
 
+Important details:
+
+- immediate event-driven scale-up is triggered only for quota-related `FailedCreate` and `PresentError` events
+- those events are filtered by process start time, so a freshly started controller does not replay old quota-denied events
+- cluster fit checks use allocatable worker-node capacity minus currently requested pod resources
+- control-plane nodes, unschedulable nodes, and nodes with the scaling `NoSchedule` taint are excluded from quota scale-up capacity
+
 ## How node scaling works
 
 When node scaling is enabled:
@@ -159,6 +171,50 @@ When node scaling is enabled:
 
 The node scaling controller also manages reserved scaling nodes by adding or removing the scaling label and `NoSchedule` taint as part of scale-out and scale-in workflows.
 The maximum MachineDeployment replica count for node scaling is capped by `--node-scaling-max-nodes`, which defaults to `3`.
+
+Important runtime behavior:
+
+- if the manifest starts with `spec.replicas: 0`, startup baseline reconciliation changes it to `1`
+- `spec.replicas` updates preserve the rest of the YAML document and write with 2-space indentation
+- if the repo already exists locally and a pull fails, the controller can keep operating from the existing local checkout as long as the configured manifest is still readable
+- git commit and push operations emit `INFO` logs that include the manifest path, repository, branch, and commit hash
+
+### Scale-out sequence
+
+1. The quota controller detects that desired quota exceeds current worker capacity.
+2. The node scaling controller first tries to reuse a node that is already in a scale-in waiter.
+3. If several waiters exist, the lower-order waiter is reused first and only that waiter is cancelled.
+4. If no reusable waiter exists, the controller activates the first unused scaling node from `NodeScalingInventory`.
+5. If needed, it increments the Git-managed `MachineDeployment` replica count, updates `NodeScalingInventory`, commits, and pushes the manifest change.
+
+### Scale-in sequence
+
+1. Automatic scale-in becomes eligible only after managed quota limits fit within non-scaling capacity for `--node-scale-in-delay`.
+2. Existing unused scaling nodes are removed from desired `MachineDeployment` replicas first, down to a hard minimum baseline of `1`.
+3. Additional used scaling nodes can be reserved in parallel for future scale-in.
+4. Reserved nodes are marked with the scaling label and `NoSchedule` taint, then watched asynchronously until they no longer have blocking pods.
+5. When a reserved node drains, it is marked unused in `NodeScalingInventory` and another scale-in reconcile is queued.
+6. If a new scale-out request arrives while scale-in waiters are active, only the reused waiter is cancelled; the other waiters continue.
+
+### What counts as a blocking pod during scale-in
+
+Reserved scale-in nodes are considered drained only when no blocking pods remain.
+
+Ignored by default:
+
+- terminal pods in `Succeeded` or `Failed`
+- pods already being deleted
+- mirror/static pods
+- `DaemonSet` pods
+- pods in namespaces listed by `--node-scale-in-exempt-namespaces`
+- pods with the configured exempt label or annotation marker
+
+Blocking by default:
+
+- regular workload pods that are still running on the reserved node
+- middleware or platform pods that are not exempted by namespace or marker
+
+If blocking pods remain for longer than `--node-scale-in-force-delay`, the controller force-completes that node's scale-in path without using the eviction API.
 
 ## Running locally
 
@@ -197,6 +253,10 @@ In that case, install the CRD first.
 | `--quota-check-interval` | Periodic quota utilization check interval | `1m` |
 | `--quota-update-interval` | Minimum delay between resize operations for the same namespace | `1m` |
 | `--node-scale-in-delay` | How long scale-in eligibility must remain true before automatic scale-in | `5m` |
+| `--node-scale-in-force-delay` | How long a reserved scale-in node may keep blocking pods before forced scale-in path continues | `5m` |
+| `--node-scale-in-exempt-namespaces` | Comma-separated namespaces whose pods do not block scale-in | `kube-system` |
+| `--node-scale-in-exempt-pod-key` | Label or annotation key that marks a pod as scale-in exempt | `quotascale.dcn.ssu.ac.kr/scale-in-exempt` |
+| `--node-scale-in-exempt-pod-value` | Label or annotation value that marks a pod as scale-in exempt | `true` |
 | `--node-scaling-max-nodes` | Maximum MachineDeployment replica count allowed for node scaling | `3` |
 | `--node-scaling-repo-url` | Git repository URL for node scaling manifests | `""` |
 | `--node-scaling-repo-branch` | Git branch for node scaling manifests | `""` |
@@ -219,12 +279,14 @@ When both are set, the runtime flags take precedence over the environment
 variables.
 
 The referenced file must be a CAPI `MachineDeployment` manifest.
+If `GITEA_REPO_URL` uses HTTP basic authentication, the controller uses `GITEA_USERNAME` and `GITEA_PASSWORD` for clone, pull, commit, and push operations.
 
 ## Example manifests
 
 - `example/compute-resources.yaml`: example `ResourceQuota`
 - `example/example-scaler.yaml`: example `QuotaAutoscaler`
 - `example/test-workload.yaml`: simple test deployment for quota pressure
+- `example/test/`: full demo scenario with namespaces, workloads, HPA, and Locust-based replay traffic
 
 ## RBAC summary
 
@@ -251,3 +313,4 @@ If you use the stub resize implementation, `patch` permission on `resourcequotas
 - quota-denied event handling is focused on workload creation failures
 - `DaemonSet` workloads are not part of quota expansion logic
 - node scaling behavior assumes a GitOps-managed `MachineDeployment`
+- force-completing a timed-out scale-in waiter does not evict pods; it advances controller state so infrastructure scaling can continue
