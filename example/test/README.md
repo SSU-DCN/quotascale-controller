@@ -19,6 +19,77 @@ The goal is that a third party can look at this folder and see that:
 - the A/B traffic files are reproducible from official log files
 - the Locust execution model matches the claim being demonstrated
 
+## Fresh Cluster Assumption
+
+This guide assumes a very fresh Kubernetes cluster where the base control plane
+is already working and a CNI plugin has been installed, but common add-ons such
+as `metrics-server` are not installed yet.
+
+Before applying the demo manifests, make sure you have:
+
+- working `kubectl` access to the cluster
+- a CNI plugin already installed
+- DNS working inside the cluster
+- outbound image pulls allowed from your nodes
+
+## Install Metrics Server
+
+This demo uses CPU-based HPA, so `metrics-server` must be installed first.
+The official Metrics Server installation command is:
+
+```sh
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+```
+
+After installation, verify that the deployment is ready:
+
+```sh
+kubectl -n kube-system rollout status deploy/metrics-server
+kubectl get apiservice v1beta1.metrics.k8s.io
+kubectl top nodes
+```
+
+If `kubectl top nodes` or `kubectl top pods` fails in a lab or self-signed
+environment because kubelet certificates are not signed by the cluster CA,
+Metrics Server's own documentation notes that you may need to run it with
+`--kubelet-insecure-tls`. In that case, patch the deployment after install:
+
+```sh
+kubectl -n kube-system patch deployment metrics-server \
+  --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+Then restart-check it:
+
+```sh
+kubectl -n kube-system rollout status deploy/metrics-server
+kubectl top nodes
+```
+
+## Install Locust
+
+Locust runs outside the cluster on the traffic generator host or VM.
+The official installation flow is:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install locust
+locust -V
+```
+
+If you do not want a virtual environment, the minimal official install command
+is:
+
+```sh
+pip install locust
+```
+
+For this demo, running Locust in a virtual environment is recommended so the
+traffic generator machine stays isolated from system Python packages.
+
 ## Scenario Summary
 
 - Namespace A: `quota-test-a`
@@ -56,7 +127,7 @@ both namespaces are just clones of the same app.
 - `10-resourcequotas.yaml`: per-namespace `ResourceQuota`
 - `20-quotaautoscalers.yaml`: per-namespace `QuotaAutoscaler`
 - `30-workloads.yaml`: `podinfo` and `go-httpbin` deployments
-- `35-services.yaml`: ClusterIP Services for traffic generation
+- `35-services.yaml`: `NodePort` Services for traffic generation from an external Locust VM
 - `40-hpa.yaml`: per-namespace HPA
 - `locust/build_worldcup_trace.py`: converts official World Cup binary logs into per-second CSV traces
 - `locust/worldcup_a.csv`: namespace A traffic trace
@@ -65,6 +136,7 @@ both namespaces are just clones of the same app.
 - `locust/worldcup_b.summary.txt`: provenance for namespace B trace
 - `locust/locustfile.py`: replay runner
 - `locust/run_dual_replay.sh`: convenience launcher for two Locust processes
+- `locust/stop_dual_replay.sh`: stops the two replay processes created by the launcher
 
 ## Traffic Provenance
 
@@ -128,6 +200,23 @@ That keeps the logic simple:
 - one process
 - one service
 - one World Cup-derived curve
+
+## How The Traffic Generator Reaches The Workloads
+
+The demo assumes Locust runs on a separate traffic-generator VM outside the
+cluster. In that setup, Kubernetes internal FQDNs such as
+`quota-test-app-a.quota-test-a.svc.cluster.local` are not directly reachable
+from the VM.
+
+For that reason, `example/test/35-services.yaml` exposes both workloads as
+`NodePort` Services:
+
+- namespace A: `http://<NODE_IP>:30080`
+- namespace B: `http://<NODE_IP>:30081`
+
+Use any reachable Kubernetes node IP for `<NODE_IP>` from the traffic
+generator VM. The `run_dual_replay.sh` helper script uses `NODE_IP` and these
+NodePort values by default.
 
 ## How The Replay Works
 
@@ -199,13 +288,17 @@ kubectl apply -f example/test/40-hpa.yaml
 
 - `QuotaAutoscaler` CRD is installed
 - `metrics-server` or equivalent metrics source is working for HPA
+- `kubectl top nodes` and `kubectl top pods -A` both succeed
 - the QuotaScale controller is running
 - `podinfo` and `go-httpbin` pods are Ready
+- `quota-test-app-a` is reachable at `http://<NODE_IP>:30080`
+- `quota-test-app-b` is reachable at `http://<NODE_IP>:30081`
 - namespace quotas exist before traffic starts
 - Locust is installed in the traffic generator environment
-- the traffic generator can resolve:
-  - `quota-test-app-a.quota-test-a.svc.cluster.local`
-  - `quota-test-app-b.quota-test-b.svc.cluster.local`
+- `locust -V` succeeds on the traffic generator machine
+- the traffic generator VM can connect to:
+  - `<NODE_IP>:30080`
+  - `<NODE_IP>:30081`
 
 ## Launch Plan Just Before The Experiment
 
@@ -214,9 +307,10 @@ Run namespace A replay:
 ```sh
 WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_a.csv \
 RPS_SCALE=6.0 \
+NODE_IP=<REACHABLE_K8S_NODE_IP> \
 locust -f example/test/locust/locustfile.py \
   --headless \
-  --host http://quota-test-app-a.quota-test-a.svc.cluster.local \
+  --host http://<REACHABLE_K8S_NODE_IP>:30080 \
   PodinfoUser
 ```
 
@@ -225,16 +319,24 @@ Run namespace B replay:
 ```sh
 WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_b.csv \
 RPS_SCALE=6.0 \
+NODE_IP=<REACHABLE_K8S_NODE_IP> \
 locust -f example/test/locust/locustfile.py \
   --headless \
-  --host http://quota-test-app-b.quota-test-b.svc.cluster.local \
+  --host http://<REACHABLE_K8S_NODE_IP>:30081 \
   HttpbinUser
 ```
 
 Or use:
 
 ```sh
+NODE_IP=<REACHABLE_K8S_NODE_IP> \
 bash example/test/locust/run_dual_replay.sh
+```
+
+Stop both replay processes:
+
+```sh
+bash example/test/locust/stop_dual_replay.sh
 ```
 
 This repository does not currently have `locust` installed locally, so the
