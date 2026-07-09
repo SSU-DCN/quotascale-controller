@@ -266,6 +266,13 @@ In that case, install the CRD first.
 
 ## Node scaling GitOps configuration
 
+The current GitOps integration is intended to run on top of Argo CD.
+In other words, this controller updates a Git-managed `MachineDeployment` manifest, and Argo CD is expected to reconcile that repository change into the workload cluster.
+
+At this stage, the README deliberately does not lock down the full GitOps operating contract yet.
+That means the repository layout, Argo CD `Application` manifests, bootstrap sequence, credentials wiring, and any supporting files required for a production GitOps flow are not treated as finalized in this document.
+Those details will be added later once the end-to-end GitOps logic is finalized.
+
 When `--enable-node-scaling=true`, the controller reads the following environment variables:
 
 - `GITEA_REPO_URL`
