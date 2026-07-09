@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -136,7 +137,7 @@ func (runtime *NodeScalingRuntime) SyncRepo() error {
 		}
 		if err := runtime.pullRepo(); err != nil {
 			if fallbackErr := runtime.ensureLocalMachineDeploymentReadable(); fallbackErr == nil {
-				logging.LogError(
+				logging.LogWarning(
 					"Node scaling repo pull failed for %s in %s, but using existing local repo because %s is readable: %s",
 					runtime.Config.RepoURL,
 					runtime.RepoDir,
@@ -264,6 +265,7 @@ func (runtime *NodeScalingRuntime) CommitAndPush(message string) error {
 		Author: &object.Signature{
 			Name:  runtime.Config.Username,
 			Email: fmt.Sprintf("%s@gitea.local", runtime.Config.Username),
+			When:  time.Now().UTC(),
 		},
 	})
 	if err != nil {
