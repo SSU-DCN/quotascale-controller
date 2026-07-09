@@ -111,12 +111,18 @@ spec:
   scope: Cluster
   versions:
     - additionalPrinterColumns:
-        - jsonPath: .spec.machineDeploymentReplicas
+        - jsonPath: .status.desired
+          name: Desired
+          type: integer
+        - jsonPath: .status.replicas
           name: Replicas
           type: integer
-        - jsonPath: .spec.nodes[*].name
-          name: Nodes
-          type: string
+        - jsonPath: .status.used
+          name: Used
+          type: integer
+        - jsonPath: .status.unused
+          name: Unused
+          type: integer
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
@@ -150,3 +156,18 @@ spec:
                         format: int32
                       used:
                         type: boolean
+            status:
+              type: object
+              properties:
+                desired:
+                  type: integer
+                  format: int32
+                replicas:
+                  type: integer
+                  format: int32
+                used:
+                  type: integer
+                  format: int32
+                unused:
+                  type: integer
+                  format: int32

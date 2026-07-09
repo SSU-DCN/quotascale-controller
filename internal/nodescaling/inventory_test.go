@@ -77,6 +77,32 @@ func TestBuildNodeScalingInventorySpecKeepsObservedNodesEvenWhenTheyExceedDesire
 	}
 }
 
+func TestBuildNodeScalingInventoryStatusSummarizesDesiredReplicasAndUsage(t *testing.T) {
+	spec := inventoryv1.NodeScalingInventorySpec{
+		MachineDeploymentReplicas: 3,
+		Nodes: []inventoryv1.NodeScalingInventoryNode{
+			{Name: "node-a", Order: 1, Used: true},
+			{Name: "node-b", Order: 2, Used: false},
+			{Name: "node-c", Order: 3, Used: true},
+		},
+	}
+
+	got := BuildNodeScalingInventoryStatus(spec)
+
+	if got.Desired != 3 {
+		t.Fatalf("expected desired replicas 3, got %d", got.Desired)
+	}
+	if got.Replicas != 3 {
+		t.Fatalf("expected observed replicas 3, got %d", got.Replicas)
+	}
+	if got.Used != 2 {
+		t.Fatalf("expected used nodes 2, got %d", got.Used)
+	}
+	if got.Unused != 1 {
+		t.Fatalf("expected unused nodes 1, got %d", got.Unused)
+	}
+}
+
 func TestFindFirstUnusedInventoryNodeReturnsLowestOrderUnusedNode(t *testing.T) {
 	inventory := &inventoryv1.NodeScalingInventory{
 		Spec: inventoryv1.NodeScalingInventorySpec{

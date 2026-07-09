@@ -58,6 +58,7 @@ func (store *KubernetesNodeScalingInventoryStore) Sync(machineDeploymentReplicas
 		Kind:       "NodeScalingInventory",
 	}
 	inventory.Spec = BuildNodeScalingInventorySpec(inventory.Spec, machineDeploymentReplicas, nodeNames)
+	inventory.Status = BuildNodeScalingInventoryStatus(inventory.Spec)
 
 	return store.update(inventory)
 }
@@ -94,6 +95,7 @@ func (store *KubernetesNodeScalingInventoryStore) updateNodeUsage(nodeName strin
 			continue
 		}
 		inventory.Spec.Nodes[i].Used = used
+		inventory.Status = BuildNodeScalingInventoryStatus(inventory.Spec)
 		return store.update(inventory)
 	}
 
@@ -107,6 +109,7 @@ func (store *KubernetesNodeScalingInventoryStore) UpdateMachineDeploymentReplica
 	}
 
 	inventory.Spec.MachineDeploymentReplicas = replicas
+	inventory.Status = BuildNodeScalingInventoryStatus(inventory.Spec)
 	return store.update(inventory)
 }
 
@@ -131,6 +134,7 @@ func (store *KubernetesNodeScalingInventoryStore) create(machineDeploymentReplic
 		},
 		Spec: BuildNodeScalingInventorySpec(inventoryv1.NodeScalingInventorySpec{}, machineDeploymentReplicas, nodeNames),
 	}
+	inventory.Status = BuildNodeScalingInventoryStatus(inventory.Spec)
 
 	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(inventory)
 	if err != nil {
@@ -196,6 +200,23 @@ func BuildNodeScalingInventorySpec(existing inventoryv1.NodeScalingInventorySpec
 
 	spec.Nodes = retainedNodes
 	return spec
+}
+
+func BuildNodeScalingInventoryStatus(spec inventoryv1.NodeScalingInventorySpec) inventoryv1.NodeScalingInventoryStatus {
+	status := inventoryv1.NodeScalingInventoryStatus{
+		Desired:  spec.MachineDeploymentReplicas,
+		Replicas: int32(len(spec.Nodes)),
+	}
+
+	for _, node := range spec.Nodes {
+		if node.Used {
+			status.Used++
+			continue
+		}
+		status.Unused++
+	}
+
+	return status
 }
 
 func normalizeNodeNames(nodeNames []string) []string {
