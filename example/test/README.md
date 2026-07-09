@@ -111,6 +111,9 @@ traffic generator machine stays isolated from system Python packages.
   - namespace A: `70%` CPU
   - namespace B: `50%` CPU
   - `maxReplicas: 15`
+  - explicit HPA behavior with configured scale-up and scale-down policies
+  - scale-down stabilization window: `20s`
+  - scale-down policy: up to `100%` per `15s`, allowing direct return to `minReplicas`
 
 ## Workloads
 

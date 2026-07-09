@@ -10,6 +10,24 @@ spec:
     name: quota-test-app-a
   minReplicas: 1
   maxReplicas: 15
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 20
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
   metrics:
     - type: Resource
       resource:
@@ -30,6 +48,24 @@ spec:
     name: quota-test-app-b
   minReplicas: 1
   maxReplicas: 15
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 20
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
   metrics:
     - type: Resource
       resource:
