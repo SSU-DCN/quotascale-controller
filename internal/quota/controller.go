@@ -47,6 +47,7 @@ type QuotaWatcher struct {
 	Scalers map[string]v14.QuotaAutoscaler
 	Quotas  map[string]v12.ResourceQuota
 	Events  map[string][]v12.Event
+	Started time.Time
 
 	Client                 kubernetes.Interface
 	ScaleOutRequestHandler nodescaling.ScaleOutRequestHandler
@@ -71,6 +72,7 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 		Scalers:                map[string]v14.QuotaAutoscaler{},
 		Quotas:                 map[string]v12.ResourceQuota{},
 		Events:                 map[string][]v12.Event{},
+		Started:                time.Now().UTC(),
 		Client:                 controller.client,
 		ScaleOutRequestHandler: controller.scaleOutRequestHandler,
 	}
@@ -256,6 +258,9 @@ func (watcher *QuotaWatcher) RegisterMissingResourceQuota(namespace, quotaName s
 // The returned boolean indicates whether quota scaling should run immediately.
 func (watcher *QuotaWatcher) RegisterNamespacedEvent(event watch.Event) (string, bool) {
 	ev := event.Object.(*v12.Event)
+	if watcher.shouldIgnoreHistoricalEvent(ev) {
+		return "", false
+	}
 	target := ev.InvolvedObject
 
 	if _, ok := watcher.Events[target.Namespace]; !ok {
@@ -265,6 +270,38 @@ func (watcher *QuotaWatcher) RegisterNamespacedEvent(event watch.Event) (string,
 	}
 
 	return ev.Namespace, IsImmediateQuotaDeniedEvent(ev)
+}
+
+func (watcher *QuotaWatcher) shouldIgnoreHistoricalEvent(ev *v12.Event) bool {
+	if ev == nil || watcher.Started.IsZero() {
+		return false
+	}
+
+	occurredAt := eventOccurredAt(ev)
+	if occurredAt.IsZero() {
+		return false
+	}
+
+	return occurredAt.Before(watcher.Started)
+}
+
+func eventOccurredAt(ev *v12.Event) time.Time {
+	if ev == nil {
+		return time.Time{}
+	}
+	if !ev.EventTime.IsZero() {
+		return ev.EventTime.Time.UTC()
+	}
+	if !ev.LastTimestamp.IsZero() {
+		return ev.LastTimestamp.Time.UTC()
+	}
+	if !ev.FirstTimestamp.IsZero() {
+		return ev.FirstTimestamp.Time.UTC()
+	}
+	if !ev.CreationTimestamp.IsZero() {
+		return ev.CreationTimestamp.Time.UTC()
+	}
+	return time.Time{}
 }
 
 func IsImmediateQuotaDeniedEvent(ev *v12.Event) bool {

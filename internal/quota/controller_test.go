@@ -3,6 +3,7 @@ package quota
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
 	scalerv1 "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/apis/quotaautoscaler/v1"
@@ -26,7 +27,8 @@ func (handler *captureScaleOutRequestHandler) HandleScaleOutRequest(request node
 
 func TestRegisterNamespacedEventMarksQuotaDeniedEventsAsImmediate(t *testing.T) {
 	watcher := &QuotaWatcher{
-		Events: map[string][]corev1.Event{},
+		Events:  map[string][]corev1.Event{},
+		Started: time.Now().UTC().Add(-time.Minute),
 	}
 
 	namespace, immediate := watcher.RegisterNamespacedEvent(watch.Event{
@@ -58,7 +60,8 @@ func TestRegisterNamespacedEventMarksQuotaDeniedEventsAsImmediate(t *testing.T) 
 
 func TestRegisterNamespacedEventKeepsNonQuotaFailuresAggregated(t *testing.T) {
 	watcher := &QuotaWatcher{
-		Events: map[string][]corev1.Event{},
+		Events:  map[string][]corev1.Event{},
+		Started: time.Now().UTC().Add(-time.Minute),
 	}
 
 	_, immediate := watcher.RegisterNamespacedEvent(watch.Event{
@@ -79,6 +82,76 @@ func TestRegisterNamespacedEventKeepsNonQuotaFailuresAggregated(t *testing.T) {
 	})
 	if immediate {
 		t.Fatalf("expected non-quota failure to stay on aggregated path")
+	}
+}
+
+func TestRegisterNamespacedEventIgnoresHistoricalEventsBeforeWatcherStart(t *testing.T) {
+	watcher := &QuotaWatcher{
+		Events:  map[string][]corev1.Event{},
+		Started: time.Now().UTC(),
+	}
+
+	namespace, immediate := watcher.RegisterNamespacedEvent(watch.Event{
+		Type: watch.Added,
+		Object: &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "old-failed-create",
+				Namespace:         "default",
+				CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-10 * time.Minute)),
+			},
+			LastTimestamp: metav1.NewTime(time.Now().UTC().Add(-9 * time.Minute)),
+			Reason:        "FailedCreate",
+			Message:       "Error creating: pods \"demo\" is forbidden: exceeded quota: compute-resources",
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "ReplicaSet",
+				Namespace: "default",
+				Name:      "demo-rs",
+			},
+		},
+	})
+	if namespace != "" {
+		t.Fatalf("expected historical event to be ignored, got namespace %q", namespace)
+	}
+	if immediate {
+		t.Fatalf("expected historical event not to trigger immediate reconciliation")
+	}
+	if len(watcher.Events) != 0 {
+		t.Fatalf("expected ignored historical event not to be stored")
+	}
+}
+
+func TestRegisterNamespacedEventKeepsNewEventsAfterWatcherStart(t *testing.T) {
+	watcher := &QuotaWatcher{
+		Events:  map[string][]corev1.Event{},
+		Started: time.Now().UTC().Add(-time.Minute),
+	}
+
+	namespace, immediate := watcher.RegisterNamespacedEvent(watch.Event{
+		Type: watch.Added,
+		Object: &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "new-failed-create",
+				Namespace:         "default",
+				CreationTimestamp: metav1.NewTime(time.Now().UTC()),
+			},
+			EventTime: metav1.MicroTime{Time: time.Now().UTC()},
+			Reason:    "FailedCreate",
+			Message:   "Error creating: pods \"demo\" is forbidden: exceeded quota: compute-resources",
+			InvolvedObject: corev1.ObjectReference{
+				Kind:      "ReplicaSet",
+				Namespace: "default",
+				Name:      "demo-rs",
+			},
+		},
+	})
+	if namespace != "default" {
+		t.Fatalf("expected namespace default, got %q", namespace)
+	}
+	if !immediate {
+		t.Fatalf("expected new quota denied event to trigger immediate reconciliation")
+	}
+	if len(watcher.Events["default"]) != 1 {
+		t.Fatalf("expected new event to be stored for namespace default")
 	}
 }
 
