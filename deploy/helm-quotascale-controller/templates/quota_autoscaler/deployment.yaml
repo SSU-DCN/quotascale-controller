@@ -28,27 +28,27 @@ spec:
         deployment: {{ $container.name }}
     spec:
       containers:
-        image: {{ $container.repository }}:{{ $container.tag }}
-        imagePullPolicy: Always
-        name: {{ $container.name }}
-        args:
-          - --enable-node-scaling={{ $container.enableNodeScaling | default false }}
-          - --quota-check-interval={{ $container.quotaCheckInterval | default "1m" }}
-          - --quota-update-interval={{ $container.quotaUpdateInterval | default "1m" }}
+        - image: {{ $container.repository }}:{{ $container.tag }}
+          imagePullPolicy: Always
+          name: {{ $container.name }}
+          args:
+            - --enable-node-scaling={{ $container.enableNodeScaling | default false }}
+            - --quota-check-interval={{ $container.quotaCheckInterval | default "1m" }}
+            - --quota-update-interval={{ $container.quotaUpdateInterval | default "1m" }}
 {{- if $container.gitopsSecretName }}
-        envFrom:
-          - secretRef:
-              name: {{ $container.gitopsSecretName }}
+          envFrom:
+            - secretRef:
+                name: {{ $container.gitopsSecretName }}
 {{- end }}
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "2000M"
-          limits:
-            cpu: "2"
-            memory: "2000M"
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "2000M"
+            limits:
+              cpu: "2"
+              memory: "2000M"
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler
