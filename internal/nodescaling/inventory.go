@@ -162,26 +162,39 @@ func BuildNodeScalingInventorySpec(existing inventoryv1.NodeScalingInventorySpec
 	}
 
 	normalizedNames := normalizeNodeNames(nodeNames)
+	observedNodeNames := map[string]struct{}{}
+	for _, nodeName := range normalizedNames {
+		observedNodeNames[nodeName] = struct{}{}
+	}
+
+	retainedNodes := make([]inventoryv1.NodeScalingInventoryNode, 0, len(normalizedNames))
+	for _, node := range existingNodes {
+		if _, exists := observedNodeNames[node.Name]; !exists {
+			continue
+		}
+		retainedNodes = append(retainedNodes, node)
+	}
+
 	for _, nodeName := range normalizedNames {
 		if _, exists := existingNodeNames[nodeName]; exists {
 			continue
 		}
 		maxOrder++
-		existingNodes = append(existingNodes, inventoryv1.NodeScalingInventoryNode{
+		retainedNodes = append(retainedNodes, inventoryv1.NodeScalingInventoryNode{
 			Name:  nodeName,
 			Order: maxOrder,
 			Used:  false,
 		})
 	}
 
-	sort.SliceStable(existingNodes, func(i, j int) bool {
-		if existingNodes[i].Order == existingNodes[j].Order {
-			return existingNodes[i].Name < existingNodes[j].Name
+	sort.SliceStable(retainedNodes, func(i, j int) bool {
+		if retainedNodes[i].Order == retainedNodes[j].Order {
+			return retainedNodes[i].Name < retainedNodes[j].Name
 		}
-		return existingNodes[i].Order < existingNodes[j].Order
+		return retainedNodes[i].Order < retainedNodes[j].Order
 	})
 
-	spec.Nodes = existingNodes
+	spec.Nodes = retainedNodes
 	return spec
 }
 

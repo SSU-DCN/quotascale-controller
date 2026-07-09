@@ -31,6 +31,52 @@ func TestBuildNodeScalingInventorySpecAppendsNewNodesAndPreservesExistingState(t
 	}
 }
 
+func TestBuildNodeScalingInventorySpecRemovesNodesThatAreNoLongerObserved(t *testing.T) {
+	existing := inventoryv1.NodeScalingInventorySpec{
+		MachineDeploymentReplicas: 2,
+		Nodes: []inventoryv1.NodeScalingInventoryNode{
+			{Name: "node-a", Order: 1, Used: true},
+			{Name: "node-b", Order: 2, Used: false},
+			{Name: "node-c", Order: 3, Used: false},
+		},
+	}
+
+	got := BuildNodeScalingInventorySpec(existing, 1, []string{"node-a"})
+
+	wantNodes := []inventoryv1.NodeScalingInventoryNode{
+		{Name: "node-a", Order: 1, Used: true},
+	}
+	if !reflect.DeepEqual(got.Nodes, wantNodes) {
+		t.Fatalf("expected only currently observed nodes to remain, got %#v", got.Nodes)
+	}
+	if got.MachineDeploymentReplicas != 1 {
+		t.Fatalf("expected desired replicas to be updated to 1, got %d", got.MachineDeploymentReplicas)
+	}
+}
+
+func TestBuildNodeScalingInventorySpecKeepsObservedNodesEvenWhenTheyExceedDesiredReplicas(t *testing.T) {
+	existing := inventoryv1.NodeScalingInventorySpec{
+		MachineDeploymentReplicas: 2,
+		Nodes: []inventoryv1.NodeScalingInventoryNode{
+			{Name: "node-a", Order: 1, Used: true},
+			{Name: "node-b", Order: 2, Used: false},
+		},
+	}
+
+	got := BuildNodeScalingInventorySpec(existing, 0, []string{"node-a", "node-b"})
+
+	wantNodes := []inventoryv1.NodeScalingInventoryNode{
+		{Name: "node-a", Order: 1, Used: true},
+		{Name: "node-b", Order: 2, Used: false},
+	}
+	if !reflect.DeepEqual(got.Nodes, wantNodes) {
+		t.Fatalf("expected observed nodes to remain until they actually disappear, got %#v", got.Nodes)
+	}
+	if got.MachineDeploymentReplicas != 0 {
+		t.Fatalf("expected desired replicas to be updated to 0, got %d", got.MachineDeploymentReplicas)
+	}
+}
+
 func TestFindFirstUnusedInventoryNodeReturnsLowestOrderUnusedNode(t *testing.T) {
 	inventory := &inventoryv1.NodeScalingInventory{
 		Spec: inventoryv1.NodeScalingInventorySpec{
