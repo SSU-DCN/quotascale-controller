@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	git "github.com/go-git/go-git/v5"
@@ -148,6 +149,62 @@ func TestWriteMachineDeploymentReplicasUpdatesSpecReplicas(t *testing.T) {
 	if replicas != 5 {
 		t.Fatalf("expected replicas to be 5, got %d", replicas)
 	}
+}
+
+func TestWriteMachineDeploymentReplicasPreservesOtherManifestFields(t *testing.T) {
+	repoDir := t.TempDir()
+	path := filepath.Join(repoDir, defaultNodeScalingFile)
+	writeFile(t, path, `apiVersion: cluster.x-k8s.io/v1beta2
+kind: MachineDeployment
+metadata:
+  name: worker-md
+  namespace: default
+spec:
+  clusterName: demo
+  replicas: 0
+  selector:
+    matchLabels:
+      pool: workers
+  template:
+    spec:
+      version: v1.30.0
+`)
+
+	runtime := &NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}
+
+	if err := runtime.WriteMachineDeploymentReplicas(1); err != nil {
+		t.Fatalf("expected replica update to succeed, got error: %v", err)
+	}
+
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected updated manifest to be readable, got error: %v", err)
+	}
+
+	content := string(updated)
+	for _, expected := range []string{
+		"apiVersion: cluster.x-k8s.io/v1beta2",
+		"kind: MachineDeployment",
+		"name: worker-md",
+		"namespace: default",
+		"clusterName: demo",
+		"pool: workers",
+		"version: v1.30.0",
+		"replicas: 1",
+	} {
+		if !contains(content, expected) {
+			t.Fatalf("expected updated manifest to contain %q, got:\n%s", expected, content)
+		}
+	}
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 func initGitRepo(t *testing.T, dir string) *git.Repository {

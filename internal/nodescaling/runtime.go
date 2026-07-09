@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/SSU-DCN/quotascale-controller/pkg/logging"
 	"gopkg.in/yaml.v2"
+	yamlv3 "gopkg.in/yaml.v3"
 )
 
 const (
@@ -303,16 +305,71 @@ func (runtime *NodeScalingRuntime) ReadMachineDeploymentReplicas() (int32, error
 }
 
 func (runtime *NodeScalingRuntime) WriteMachineDeploymentReplicas(replicas int32) error {
-	manifest, err := runtime.ReadMachineDeployment()
+	content, err := os.ReadFile(runtime.MachineDeploymentAbsolutePath())
 	if err != nil {
 		return err
 	}
 
-	manifest.Spec.Replicas = &replicas
-	content, err := yaml.Marshal(manifest)
+	var doc yamlv3.Node
+	if err := yamlv3.Unmarshal(content, &doc); err != nil {
+		return err
+	}
+
+	if err := setSpecReplicas(&doc, replicas); err != nil {
+		return err
+	}
+
+	updatedContent, err := yamlv3.Marshal(&doc)
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(runtime.MachineDeploymentAbsolutePath(), content, 0o644)
+	return os.WriteFile(runtime.MachineDeploymentAbsolutePath(), updatedContent, 0o644)
+}
+
+func setSpecReplicas(doc *yamlv3.Node, replicas int32) error {
+	if doc == nil || len(doc.Content) == 0 {
+		return errors.New("machine deployment manifest is empty")
+	}
+
+	root := doc.Content[0]
+	if root.Kind != yamlv3.MappingNode {
+		return errors.New("machine deployment manifest root must be a mapping")
+	}
+
+	specNode := findMappingValue(root, "spec")
+	if specNode == nil {
+		return errors.New("machine deployment spec is missing")
+	}
+	if specNode.Kind != yamlv3.MappingNode {
+		return errors.New("machine deployment spec must be a mapping")
+	}
+
+	replicasNode := findMappingValue(specNode, "replicas")
+	if replicasNode == nil {
+		specNode.Content = append(specNode.Content,
+			&yamlv3.Node{Kind: yamlv3.ScalarNode, Tag: "!!str", Value: "replicas"},
+			&yamlv3.Node{Kind: yamlv3.ScalarNode, Tag: "!!int", Value: strconv.FormatInt(int64(replicas), 10)},
+		)
+		return nil
+	}
+
+	replicasNode.Kind = yamlv3.ScalarNode
+	replicasNode.Tag = "!!int"
+	replicasNode.Value = strconv.FormatInt(int64(replicas), 10)
+	replicasNode.Style = 0
+	return nil
+}
+
+func findMappingValue(node *yamlv3.Node, key string) *yamlv3.Node {
+	if node == nil || node.Kind != yamlv3.MappingNode {
+		return nil
+	}
+
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
 }
