@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quota-test-app-a
+  namespace: quota-test-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quota-test-app-a
+  template:
+    metadata:
+      labels:
+        app: quota-test-app-a
+    spec:
+      containers:
+        - name: podinfo
+          image: ghcr.io/stefanprodan/podinfo:6.8.0
+          ports:
+            - containerPort: 9898
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quota-test-app-b
+  namespace: quota-test-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: quota-test-app-b
+  template:
+    metadata:
+      labels:
+        app: quota-test-app-b
+    spec:
+      containers:
+        - name: go-httpbin
+          image: ghcr.io/mccutchen/go-httpbin:v2.16.2
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /get
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /status/200
+              port: http
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi

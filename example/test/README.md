@@ -1,0 +1,241 @@
+# QuotaScale Controller Demo Test Set
+
+This directory contains a full demo scenario for exercising:
+
+- namespace-local HPA scale-out and scale-in
+- quota scale-up and scale-down by `QuotaAutoscaler`
+- pressure across two namespaces that can eventually justify node scaling
+
+The traffic story is intentionally trace-based rather than hand-made.
+The Locust input curves in `example/test/locust` were derived from the public
+`1998 World Cup Web Site Access Logs` published by the Internet Traffic Archive:
+
+- https://ita.ee.lbl.gov/html/contrib/WorldCup.html
+
+The goal is that a third party can look at this folder and see that:
+
+- the Kubernetes resources are simple and explicit
+- the traffic source is public and cited
+- the A/B traffic files are reproducible from official log files
+- the Locust execution model matches the claim being demonstrated
+
+## Scenario Summary
+
+- Namespace A: `quota-test-a`
+- Namespace B: `quota-test-b`
+- `ResourceQuota` in each namespace:
+  - `requests.cpu: 4`
+  - `limits.cpu: 4`
+  - `requests.memory: 4Gi`
+  - `limits.memory: 4Gi`
+- `QuotaAutoscaler` in each namespace:
+  - `max.cpu: 15`
+  - `max.memory: 15Gi`
+- Workload pod sizing in each namespace:
+  - `requests.cpu: 1`
+  - `limits.cpu: 1`
+  - `requests.memory: 1Gi`
+  - `limits.memory: 1Gi`
+- HPA targets:
+  - namespace A: `70%` CPU
+  - namespace B: `50%` CPU
+  - `maxReplicas: 15`
+
+## Workloads
+
+- Namespace A runs `podinfo`
+- Namespace B runs `go-httpbin`
+
+These were chosen because both are small HTTP services that fit the demo
+resource model, but they are different enough to avoid the impression that
+both namespaces are just clones of the same app.
+
+## Files
+
+- `00-namespaces.yaml`: namespaces
+- `10-resourcequotas.yaml`: per-namespace `ResourceQuota`
+- `20-quotaautoscalers.yaml`: per-namespace `QuotaAutoscaler`
+- `30-workloads.yaml`: `podinfo` and `go-httpbin` deployments
+- `35-services.yaml`: ClusterIP Services for traffic generation
+- `40-hpa.yaml`: per-namespace HPA
+- `locust/build_worldcup_trace.py`: converts official World Cup binary logs into per-second CSV traces
+- `locust/worldcup_a.csv`: namespace A traffic trace
+- `locust/worldcup_b.csv`: namespace B traffic trace
+- `locust/worldcup_a.summary.txt`: provenance for namespace A trace
+- `locust/worldcup_b.summary.txt`: provenance for namespace B trace
+- `locust/locustfile.py`: replay runner
+- `locust/run_dual_replay.sh`: convenience launcher for two Locust processes
+
+## Traffic Provenance
+
+The generated traces in this folder are not arbitrary ramps.
+
+Namespace A trace:
+
+- source file: `wc_day46_1.gz`
+- dataset interpretation: opening-day traffic, from the first match day of the tournament
+- official source date: June 10, 1998
+- selected local-time window: `1998-06-10T08:12:02+02:00` to `1998-06-10T08:42:01+02:00`
+- normalized peak: `9 RPS`
+- output file: `locust/worldcup_a.csv`
+
+Namespace B trace:
+
+- source file: `wc_day66_1.gz`
+- dataset interpretation: knockout-stage traffic, from the round-of-16 period of the tournament
+- official source date: June 30, 1998
+- selected local-time window: `1998-06-30T00:00:06+02:00` to `1998-06-30T00:30:05+02:00`
+- normalized peak: `12 RPS`
+- output file: `locust/worldcup_b.csv`
+
+The normalization keeps the original burst shape but scales the absolute
+throughput down to a demo-safe level.
+
+This choice is intentional:
+
+- namespace A uses an opening-day slice so the demo includes a trace tied to the start of the event
+- namespace B uses a knockout-stage slice so the demo also includes a trace from a later, higher-interest tournament phase
+- together they show that the replay inputs were selected from meaningful points in the public dataset, not invented ad hoc
+
+The exact provenance is stored in:
+
+- `locust/worldcup_a.summary.txt`
+- `locust/worldcup_b.summary.txt`
+
+## Why Two Locust Processes
+
+Locust can represent multiple user classes in one test file, and each user
+class can target a different host. However, the official custom shape model
+controls one runner-wide user count and spawn rate over time. In other words,
+the built-in `LoadTestShape.tick()` contract gives one time-series for the
+runner, not two independent time-series with separate counts for A and B.
+
+Official references:
+
+- Custom load shapes:
+  - https://docs.locust.io/en/stable/custom-load-shape.html
+- Writing a locustfile:
+  - https://docs.locust.io/en/stable/writing-a-locustfile.html
+
+Because this demo needs two different traffic curves, the clearer and more
+defensible setup is:
+
+- one headless Locust process for namespace A replay
+- one headless Locust process for namespace B replay
+
+That keeps the logic simple:
+
+- one process
+- one service
+- one World Cup-derived curve
+
+## How The Replay Works
+
+`locust/locustfile.py` replays a per-second CSV with columns:
+
+```csv
+second,rps
+0,6.84
+1,6.90
+2,6.94
+```
+
+The file contains normalized `RPS` values derived from the World Cup logs.
+The Locust runner converts those values into user counts over time. Each user
+is paced with `constant_throughput(1)`, so one user aims to issue roughly one
+task per second. `RPS_SCALE` then scales the replay intensity up or down while
+keeping the original shape.
+
+This means:
+
+- the curve shape comes from real data
+- the absolute load is adapted to the cluster
+- the scaling factor is explicit, not hidden
+
+## Rebuilding The Trace Files
+
+The trace CSVs in this folder were built from the official ITA logs.
+If you want to regenerate them:
+
+```sh
+curl -L -o /tmp/wc_day46_1.gz https://ita.ee.lbl.gov/traces/WorldCup/wc_day46_1.gz
+curl -L -o /tmp/wc_day66_1.gz https://ita.ee.lbl.gov/traces/WorldCup/wc_day66_1.gz
+
+python3 example/test/locust/build_worldcup_trace.py \
+  --input /tmp/wc_day46_1.gz \
+  --output example/test/locust/worldcup_a.csv \
+  --summary example/test/locust/worldcup_a.summary.txt \
+  --window-seconds 1800 \
+  --peak-rps 9
+
+python3 example/test/locust/build_worldcup_trace.py \
+  --input /tmp/wc_day66_1.gz \
+  --output example/test/locust/worldcup_b.csv \
+  --summary example/test/locust/worldcup_b.summary.txt \
+  --window-seconds 1800 \
+  --peak-rps 12
+```
+
+What the builder does:
+
+- parses the official binary log format directly
+- counts requests per second
+- finds the busiest `window-seconds` interval in the source file
+- smooths the series with a short moving average
+- scales the peak to the requested value
+
+## Apply Order
+
+```sh
+kubectl apply -f example/test/00-namespaces.yaml
+kubectl apply -f example/test/10-resourcequotas.yaml
+kubectl apply -f example/test/20-quotaautoscalers.yaml
+kubectl apply -f example/test/30-workloads.yaml
+kubectl apply -f example/test/35-services.yaml
+kubectl apply -f example/test/40-hpa.yaml
+```
+
+## Pre-Experiment Checklist
+
+- `QuotaAutoscaler` CRD is installed
+- `metrics-server` or equivalent metrics source is working for HPA
+- the QuotaScale controller is running
+- `podinfo` and `go-httpbin` pods are Ready
+- namespace quotas exist before traffic starts
+- Locust is installed in the traffic generator environment
+- the traffic generator can resolve:
+  - `quota-test-app-a.quota-test-a.svc.cluster.local`
+  - `quota-test-app-b.quota-test-b.svc.cluster.local`
+
+## Launch Plan Just Before The Experiment
+
+Run namespace A replay:
+
+```sh
+WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_a.csv \
+RPS_SCALE=6.0 \
+locust -f example/test/locust/locustfile.py \
+  --headless \
+  --host http://quota-test-app-a.quota-test-a.svc.cluster.local \
+  PodinfoUser
+```
+
+Run namespace B replay:
+
+```sh
+WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_b.csv \
+RPS_SCALE=6.0 \
+locust -f example/test/locust/locustfile.py \
+  --headless \
+  --host http://quota-test-app-b.quota-test-b.svc.cluster.local \
+  HttpbinUser
+```
+
+Or use:
+
+```sh
+bash example/test/locust/run_dual_replay.sh
+```
+
+This repository does not currently have `locust` installed locally, so the
+commands above are prepared but were not executed from this workspace.

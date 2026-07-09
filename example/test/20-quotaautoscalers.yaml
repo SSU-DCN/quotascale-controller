@@ -1,0 +1,57 @@
+apiVersion: dcn.ssu.ac.kr/v1
+kind: QuotaAutoscaler
+metadata:
+  name: quota-test-a-autoscaler
+  namespace: quota-test-a
+spec:
+  behavior:
+    scaleDown:
+      policies:
+        - method: cpu
+          value: 30
+          targetUtilization: 70
+        - method: memory
+          value: 30
+          targetUtilization: 70
+    scaleUp:
+      policies:
+        - method: cpu
+          value: 70
+          targetUtilization: 70
+        - method: memory
+          value: 70
+          targetUtilization: 70
+  min.cpu: "4"
+  max.cpu: "15"
+  min.memory: "4Gi"
+  max.memory: "15Gi"
+  resourceQuota: compute-resources
+---
+apiVersion: dcn.ssu.ac.kr/v1
+kind: QuotaAutoscaler
+metadata:
+  name: quota-test-b-autoscaler
+  namespace: quota-test-b
+spec:
+  behavior:
+    scaleDown:
+      policies:
+        - method: cpu
+          value: 30
+          targetUtilization: 50
+        - method: memory
+          value: 30
+          targetUtilization: 50
+    scaleUp:
+      policies:
+        - method: cpu
+          value: 70
+          targetUtilization: 50
+        - method: memory
+          value: 70
+          targetUtilization: 50
+  min.cpu: "4"
+  max.cpu: "15"
+  min.memory: "4Gi"
+  max.memory: "15Gi"
+  resourceQuota: compute-resources

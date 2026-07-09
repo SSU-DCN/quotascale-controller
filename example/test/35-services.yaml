@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: quota-test-app-a
+  namespace: quota-test-a
+spec:
+  selector:
+    app: quota-test-app-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: quota-test-app-b
+  namespace: quota-test-b
+spec:
+  selector:
+    app: quota-test-app-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
