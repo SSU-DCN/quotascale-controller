@@ -14,14 +14,23 @@ spec:
         app: quota-test-app-a
     spec:
       containers:
-        - name: podinfo
-          image: ghcr.io/stefanprodan/podinfo:6.8.0
+        - name: cpu-burn-a
+          image: python:3.12-slim
+          command: ["python", "/app/server.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DEFAULT_ROUNDS
+              value: "240000"
           ports:
-            - containerPort: 9898
+            - containerPort: 8080
               name: http
+          volumeMounts:
+            - name: app
+              mountPath: /app
           readinessProbe:
             httpGet:
-              path: /readyz
+              path: /healthz
               port: http
           livenessProbe:
             httpGet:
@@ -34,6 +43,10 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+      volumes:
+        - name: app
+          configMap:
+            name: quota-test-app-a-server
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -51,18 +64,27 @@ spec:
         app: quota-test-app-b
     spec:
       containers:
-        - name: go-httpbin
-          image: mccutchen/go-httpbin:2.23.1
+        - name: cpu-burn-b
+          image: python:3.12-slim
+          command: ["python", "/app/server.py"]
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DEFAULT_ITERATIONS
+              value: "350000"
           ports:
             - containerPort: 8080
               name: http
+          volumeMounts:
+            - name: app
+              mountPath: /app
           readinessProbe:
             httpGet:
-              path: /get
+              path: /healthz
               port: http
           livenessProbe:
             httpGet:
-              path: /status/200
+              path: /healthz
               port: http
           resources:
             requests:
@@ -71,3 +93,7 @@ spec:
             limits:
               cpu: "1"
               memory: 1Gi
+      volumes:
+        - name: app
+          configMap:
+            name: quota-test-app-b-server

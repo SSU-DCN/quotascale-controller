@@ -114,19 +114,21 @@ traffic generator machine stays isolated from system Python packages.
 
 ## Workloads
 
-- Namespace A runs `podinfo`
-- Namespace B runs `go-httpbin` from Docker Hub (`mccutchen/go-httpbin:2.23.1`)
+- Namespace A runs a CPU-heavy SHA-256 loop HTTP service
+- Namespace B runs a CPU-heavy PBKDF2 HTTP service
 
-These were chosen because both are small HTTP services that fit the demo
-resource model, but they are different enough to avoid the impression that
-both namespaces are just clones of the same app.
+These were chosen because the demo goal is HPA scale-out on CPU usage while
+keeping pod sizing fixed at `1 CPU` and `1Gi`. Both services are HTTP-based and
+intentionally CPU-heavy per request, which is much better aligned with this
+goal than lightweight health/demo services.
 
 ## Files
 
 - `00-namespaces.yaml`: namespaces
 - `10-resourcequotas.yaml`: per-namespace `ResourceQuota`
 - `20-quotaautoscalers.yaml`: per-namespace `QuotaAutoscaler`
-- `30-workloads.yaml`: `podinfo` and `go-httpbin` deployments
+- `25-workload-configmaps.yaml`: Python HTTP server scripts for the CPU-heavy test workloads
+- `30-workloads.yaml`: CPU-heavy HTTP workload deployments
 - `35-services.yaml`: `NodePort` Services for traffic generation from an external Locust VM
 - `40-hpa.yaml`: per-namespace HPA
 - `locust/build_worldcup_trace.py`: converts official World Cup binary logs into per-second CSV traces
@@ -230,14 +232,18 @@ second,rps
 ```
 
 The file contains normalized `RPS` values derived from the World Cup logs.
-The Locust runner converts those values into user counts over time. Each user
-is paced with `constant_throughput(25)`, so one user aims to issue roughly twenty-five
-tasks per second. `RPS_SCALE` then scales the replay intensity up or down while
-keeping the original shape. The default replay is intentionally aggressive
-because lightweight Go HTTP services can otherwise sit near idle CPU usage.
-For larger worker nodes such as `c5.4xlarge`, the default replay is tuned to be
-much more aggressive because very small HTTP handlers can remain far below HPA
-targets even under traffic that looks busy at first glance.
+The Locust runner buckets that signal into `30s` steps and converts each step
+into a target user count. This is intentionally less twitchy than changing the
+user count every second, which previously caused unstable ramp-up and shutdown
+behavior in Locust.
+
+Each Locust user continuously issues CPU-heavy HTTP requests with no think time:
+
+- namespace A hits `/burn?rounds=240000`
+- namespace B hits `/derive?iterations=350000`
+
+`USER_SCALE` then scales the replay intensity up or down while keeping the
+World Cup-derived shape.
 
 This means:
 
@@ -283,6 +289,7 @@ What the builder does:
 kubectl apply -f example/test/00-namespaces.yaml
 kubectl apply -f example/test/10-resourcequotas.yaml
 kubectl apply -f example/test/20-quotaautoscalers.yaml
+kubectl apply -f example/test/25-workload-configmaps.yaml
 kubectl apply -f example/test/30-workloads.yaml
 kubectl apply -f example/test/35-services.yaml
 kubectl apply -f example/test/40-hpa.yaml
@@ -294,7 +301,7 @@ kubectl apply -f example/test/40-hpa.yaml
 - `metrics-server` or equivalent metrics source is working for HPA
 - `kubectl top nodes` and `kubectl top pods -A` both succeed
 - the QuotaScale controller is running
-- `podinfo` and `go-httpbin` pods are Ready
+- CPU-heavy workload pods are Ready
 - `quota-test-app-a` is reachable at `http://<NODE_IP>:30080`
 - `quota-test-app-b` is reachable at `http://<NODE_IP>:30081`
 - namespace quotas exist before traffic starts
@@ -310,24 +317,24 @@ Run namespace A replay:
 
 ```sh
 WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_a.csv \
-RPS_SCALE=80.0 \
+USER_SCALE=12.0 \
 NODE_IP=<REACHABLE_K8S_NODE_IP> \
 locust -f example/test/locust/locustfile.py \
   --headless \
   --host http://<REACHABLE_K8S_NODE_IP>:30080 \
-  PodinfoUser
+  CpuBurnAUser
 ```
 
 Run namespace B replay:
 
 ```sh
 WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_b.csv \
-RPS_SCALE=80.0 \
+USER_SCALE=12.0 \
 NODE_IP=<REACHABLE_K8S_NODE_IP> \
 locust -f example/test/locust/locustfile.py \
   --headless \
   --host http://<REACHABLE_K8S_NODE_IP>:30081 \
-  HttpbinUser
+  CpuBurnBUser
 ```
 
 Or use:

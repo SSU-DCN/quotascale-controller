@@ -5,14 +5,14 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from locust import HttpUser, LoadTestShape, constant_throughput, task
+from locust import HttpUser, LoadTestShape, constant, task
 
 
 TRACE_FILE = Path(os.getenv("WORLD_CUP_TRACE_CSV", "example/test/locust/worldcup_a.csv"))
-RPS_SCALE = float(os.getenv("RPS_SCALE", "80.0"))
-MAX_USERS = int(os.getenv("MAX_USERS", "3000"))
-SPAWN_FLOOR = float(os.getenv("SPAWN_FLOOR", "1.0"))
-SPAWN_FACTOR = float(os.getenv("SPAWN_FACTOR", "3.0"))
+USER_SCALE = float(os.getenv("USER_SCALE", "12.0"))
+MAX_USERS = int(os.getenv("MAX_USERS", "500"))
+SPAWN_RATE = float(os.getenv("SPAWN_RATE", "20.0"))
+STEP_SECONDS = int(os.getenv("STEP_SECONDS", "30"))
 
 
 @dataclass
@@ -43,52 +43,46 @@ def load_trace(path: Path) -> list[TracePoint]:
 TRACE_POINTS = load_trace(TRACE_FILE)
 
 
-class PodinfoUser(HttpUser):
+def stepped_point(run_time: int) -> TracePoint | None:
+    if run_time >= len(TRACE_POINTS):
+        return None
+
+    start = (run_time // STEP_SECONDS) * STEP_SECONDS
+    end = min(start + STEP_SECONDS, len(TRACE_POINTS))
+    bucket = TRACE_POINTS[start:end]
+    avg_rps = sum(point.rps for point in bucket) / len(bucket)
+    return TracePoint(second=start, rps=avg_rps)
+
+
+class CpuBurnAUser(HttpUser):
     host = "http://placeholder.invalid"
-    wait_time = constant_throughput(25)
+    wait_time = constant(0)
 
-    @task(5)
-    def root(self):
-        self.client.get("/")
-
-    @task(2)
-    def headers(self):
-        self.client.get("/headers")
-
-    @task(1)
-    def delay(self):
-        self.client.get("/delay/1")
+    @task
+    def burn(self):
+        self.client.get("/burn?rounds=240000", name="/burn")
 
 
-class HttpbinUser(HttpUser):
+class CpuBurnBUser(HttpUser):
     host = "http://placeholder.invalid"
-    wait_time = constant_throughput(25)
+    wait_time = constant(0)
 
-    @task(5)
-    def get(self):
-        self.client.get("/get")
-
-    @task(2)
-    def headers(self):
-        self.client.get("/headers")
-
-    @task(1)
-    def bytes(self):
-        self.client.get("/bytes/262144", name="/bytes/[256KiB]")
+    @task
+    def derive(self):
+        self.client.get("/derive?iterations=350000", name="/derive")
 
 
 class WorldCupReplayShape(LoadTestShape):
     """
-    Replays a normalized traffic shape derived from the public World Cup 98 logs.
-    Run one Locust process per namespace so each process can follow its own trace.
+    Replays a stepped demand shape derived from the public World Cup 98 logs.
+    The trace is bucketed into STEP_SECONDS windows to avoid unstable user churn.
     """
 
     def tick(self):
         run_time = int(self.get_run_time())
-        if run_time >= len(TRACE_POINTS):
+        point = stepped_point(run_time)
+        if point is None:
             return None
 
-        point = TRACE_POINTS[run_time]
-        target_users = min(MAX_USERS, max(1, round(point.rps * RPS_SCALE)))
-        spawn_rate = max(SPAWN_FLOOR, min(float(target_users), point.rps * RPS_SCALE * SPAWN_FACTOR))
-        return (target_users, spawn_rate)
+        target_users = min(MAX_USERS, max(1, round(point.rps * USER_SCALE)))
+        return (target_users, SPAWN_RATE)

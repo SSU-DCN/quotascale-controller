@@ -9,13 +9,13 @@ A_TRACE="${A_TRACE:-example/test/locust/worldcup_a.csv}"
 A_PID_FILE="${A_PID_FILE:-${PID_DIR}/locust-a.pid}"
 A_HOST="${A_HOST:-}"
 A_LOG="${A_LOG:-/tmp/locust-a.log}"
-A_RPS_SCALE="${A_RPS_SCALE:-80.0}"
+A_USER_SCALE="${A_USER_SCALE:-12.0}"
 
 B_TRACE="${B_TRACE:-example/test/locust/worldcup_b.csv}"
 B_PID_FILE="${B_PID_FILE:-${PID_DIR}/locust-b.pid}"
 B_HOST="${B_HOST:-}"
 B_LOG="${B_LOG:-/tmp/locust-b.log}"
-B_RPS_SCALE="${B_RPS_SCALE:-80.0}"
+B_USER_SCALE="${B_USER_SCALE:-12.0}"
 
 if [[ -z "${A_HOST}" || -z "${B_HOST}" ]]; then
   : "${NODE_IP:?set NODE_IP to a reachable Kubernetes node IP, or set A_HOST/B_HOST explicitly}"
@@ -24,14 +24,14 @@ fi
 A_HOST="${A_HOST:-http://${NODE_IP}:30080}"
 B_HOST="${B_HOST:-http://${NODE_IP}:30081}"
 
-WORLD_CUP_TRACE_CSV="${A_TRACE}" RPS_SCALE="${A_RPS_SCALE}" \
-locust -f "${LOCUSTFILE}" --headless --host "${A_HOST}" PodinfoUser \
+WORLD_CUP_TRACE_CSV="${A_TRACE}" USER_SCALE="${A_USER_SCALE}" \
+locust -f "${LOCUSTFILE}" --headless --host "${A_HOST}" CpuBurnAUser \
   >"${A_LOG}" 2>&1 &
 A_PID=$!
 printf '%s\n' "${A_PID}" >"${A_PID_FILE}"
 
-WORLD_CUP_TRACE_CSV="${B_TRACE}" RPS_SCALE="${B_RPS_SCALE}" \
-locust -f "${LOCUSTFILE}" --headless --host "${B_HOST}" HttpbinUser \
+WORLD_CUP_TRACE_CSV="${B_TRACE}" USER_SCALE="${B_USER_SCALE}" \
+locust -f "${LOCUSTFILE}" --headless --host "${B_HOST}" CpuBurnBUser \
   >"${B_LOG}" 2>&1 &
 B_PID=$!
 printf '%s\n' "${B_PID}" >"${B_PID_FILE}"
@@ -48,9 +48,9 @@ echo "Target hosts:"
 echo "  A: ${A_HOST}"
 echo "  B: ${B_HOST}"
 echo
-echo "Replay scales:"
-echo "  A RPS_SCALE=${A_RPS_SCALE}"
-echo "  B RPS_SCALE=${B_RPS_SCALE}"
+echo "Replay user scales:"
+echo "  A USER_SCALE=${A_USER_SCALE}"
+echo "  B USER_SCALE=${B_USER_SCALE}"
 echo
 echo "Stop both replays with:"
 echo "  bash example/test/locust/stop_dual_replay.sh"
