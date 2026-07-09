@@ -46,13 +46,13 @@ type MachineDeploymentManifest struct {
 
 var nodeScalingRuntime *NodeScalingRuntime
 
-func InitializeNodeScaling(enabled bool) (*NodeScalingRuntime, error) {
+func InitializeNodeScaling(enabled bool, overrides NodeScalingConfig) (*NodeScalingRuntime, error) {
 	if !enabled {
 		nodeScalingRuntime = nil
 		return nil, nil
 	}
 
-	cfg, err := LoadNodeScalingConfigFromEnv()
+	cfg, err := LoadNodeScalingConfig(overrides)
 	if err != nil {
 		return nil, err
 	}
@@ -69,14 +69,14 @@ func InitializeNodeScaling(enabled bool) (*NodeScalingRuntime, error) {
 	return runtime, nil
 }
 
-func LoadNodeScalingConfigFromEnv() (NodeScalingConfig, error) {
+func LoadNodeScalingConfig(overrides NodeScalingConfig) (NodeScalingConfig, error) {
 	cfg := NodeScalingConfig{
 		Enabled:      true,
-		RepoURL:      os.Getenv("GITEA_REPO_URL"),
-		RepoBranch:   os.Getenv("GITEA_REPO_BRANCH"),
-		RepoFilePath: os.Getenv("GITEA_REPO_FILE_PATH"),
-		Username:     os.Getenv("GITEA_USERNAME"),
-		Password:     os.Getenv("GITEA_PASSWORD"),
+		RepoURL:      firstNonEmpty(overrides.RepoURL, os.Getenv("GITEA_REPO_URL")),
+		RepoBranch:   firstNonEmpty(overrides.RepoBranch, os.Getenv("GITEA_REPO_BRANCH")),
+		RepoFilePath: firstNonEmpty(overrides.RepoFilePath, os.Getenv("GITEA_REPO_FILE_PATH")),
+		Username:     firstNonEmpty(overrides.Username, os.Getenv("GITEA_USERNAME")),
+		Password:     firstNonEmpty(overrides.Password, os.Getenv("GITEA_PASSWORD")),
 	}
 	if cfg.RepoBranch == "" {
 		cfg.RepoBranch = defaultNodeScalingBranch
@@ -95,6 +95,19 @@ func LoadNodeScalingConfigFromEnv() (NodeScalingConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func LoadNodeScalingConfigFromEnv() (NodeScalingConfig, error) {
+	return LoadNodeScalingConfig(NodeScalingConfig{})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func GetNodeScalingRuntime() *NodeScalingRuntime {

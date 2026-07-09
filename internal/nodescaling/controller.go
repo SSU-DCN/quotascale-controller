@@ -17,7 +17,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const defaultScaleInTriggerDelay = 5 * time.Minute
+const (
+	defaultScaleInTriggerDelay = 5 * time.Minute
+	defaultMaxNodeCount        = int32(3)
+)
 
 type ScaleOutRequest struct {
 	Namespace string
@@ -54,6 +57,7 @@ type NodeScalingController struct {
 	inventoryStore        NodeScalingInventoryStore
 	inventorySyncInterval time.Duration
 	scaleInTriggerDelay   time.Duration
+	maxNodeCount          int32
 	scaleInEligibleSince  time.Time
 	scaleOutRequests      chan ScaleOutRequest
 	scaleInRequests       chan ScaleInRequest
@@ -71,6 +75,7 @@ func NewNodeScalingController(runtime *NodeScalingRuntime, client kubernetes.Int
 		inventoryStore:        inventoryStore,
 		inventorySyncInterval: inventorySyncInterval,
 		scaleInTriggerDelay:   defaultScaleInTriggerDelay,
+		maxNodeCount:          defaultMaxNodeCount,
 		scaleOutRequests:      make(chan ScaleOutRequest, 128),
 		scaleInRequests:       make(chan ScaleInRequest, 128),
 		scaleInWaiters:        map[string]context.CancelFunc{},
@@ -86,6 +91,13 @@ func (controller *NodeScalingController) SetScaleInTriggerDelay(delay time.Durat
 		delay = defaultScaleInTriggerDelay
 	}
 	controller.scaleInTriggerDelay = delay
+}
+
+func (controller *NodeScalingController) SetMaxNodeCount(count int32) {
+	if count <= 0 {
+		count = defaultMaxNodeCount
+	}
+	controller.maxNodeCount = count
 }
 
 func (controller *NodeScalingController) HandleScaleOutRequest(request ScaleOutRequest) error {
@@ -195,6 +207,14 @@ func (controller *NodeScalingController) ReconcileScaleOut(request ScaleOutReque
 		return err
 	}
 
+	if controller.maxNodeCount > 0 && replicas >= controller.maxNodeCount {
+		return fmt.Errorf(
+			"node scale-out requested for namespace %s, but MachineDeployment replicas %d already reached configured max node count %d",
+			request.Namespace,
+			replicas,
+			controller.maxNodeCount,
+		)
+	}
 	if err := controller.ActivateScalingNode(node.Name); err != nil {
 		return err
 	}

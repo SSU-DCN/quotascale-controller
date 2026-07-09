@@ -158,6 +158,7 @@ When node scaling is enabled:
 - it changes `spec.replicas`, commits, and pushes the change
 
 The node scaling controller also manages reserved scaling nodes by adding or removing the scaling label and `NoSchedule` taint as part of scale-out and scale-in workflows.
+The maximum MachineDeployment replica count for node scaling is capped by `--node-scaling-max-nodes`, which defaults to `3`.
 
 ## Running locally
 
@@ -196,6 +197,12 @@ In that case, install the CRD first.
 | `--quota-check-interval` | Periodic quota utilization check interval | `1m` |
 | `--quota-update-interval` | Minimum delay between resize operations for the same namespace | `1m` |
 | `--node-scale-in-delay` | How long scale-in eligibility must remain true before automatic scale-in | `5m` |
+| `--node-scaling-max-nodes` | Maximum MachineDeployment replica count allowed for node scaling | `3` |
+| `--node-scaling-repo-url` | Git repository URL for node scaling manifests | `""` |
+| `--node-scaling-repo-branch` | Git branch for node scaling manifests | `""` |
+| `--node-scaling-repo-file-path` | Path to the MachineDeployment manifest inside the node scaling repo | `""` |
+| `--node-scaling-git-username` | Git username for node scaling repo access | `""` |
+| `--node-scaling-git-password` | Git password or token for node scaling repo access | `""` |
 
 ## Node scaling GitOps configuration
 
@@ -206,6 +213,10 @@ When `--enable-node-scaling=true`, the controller reads the following environmen
 - `GITEA_REPO_FILE_PATH` optional, default `feature/node-scaling/md.yaml`
 - `GITEA_USERNAME`
 - `GITEA_PASSWORD`
+
+The same node-scaling Git settings can also be provided with runtime flags.
+When both are set, the runtime flags take precedence over the environment
+variables.
 
 The referenced file must be a CAPI `MachineDeployment` manifest.
 

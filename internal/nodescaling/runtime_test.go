@@ -28,6 +28,40 @@ func TestLoadNodeScalingConfigFromEnvDefaultsBranch(t *testing.T) {
 	}
 }
 
+func TestLoadNodeScalingConfigPrefersOverridesOverEnv(t *testing.T) {
+	t.Setenv("GITEA_REPO_URL", "https://gitea.example.local/env.git")
+	t.Setenv("GITEA_REPO_BRANCH", "env-branch")
+	t.Setenv("GITEA_REPO_FILE_PATH", "env/path.yaml")
+	t.Setenv("GITEA_USERNAME", "env-user")
+	t.Setenv("GITEA_PASSWORD", "env-pass")
+
+	cfg, err := LoadNodeScalingConfig(NodeScalingConfig{
+		RepoURL:      "https://gitea.example.local/flag.git",
+		RepoBranch:   "flag-branch",
+		RepoFilePath: "flag/path.yaml",
+		Username:     "flag-user",
+		Password:     "flag-pass",
+	})
+	if err != nil {
+		t.Fatalf("expected config to load, got error: %v", err)
+	}
+	if cfg.RepoURL != "https://gitea.example.local/flag.git" {
+		t.Fatalf("expected override repo URL, got %s", cfg.RepoURL)
+	}
+	if cfg.RepoBranch != "flag-branch" {
+		t.Fatalf("expected override branch, got %s", cfg.RepoBranch)
+	}
+	if cfg.RepoFilePath != "flag/path.yaml" {
+		t.Fatalf("expected override file path, got %s", cfg.RepoFilePath)
+	}
+	if cfg.Username != "flag-user" {
+		t.Fatalf("expected override username, got %s", cfg.Username)
+	}
+	if cfg.Password != "flag-pass" {
+		t.Fatalf("expected override password, got %s", cfg.Password)
+	}
+}
+
 func TestNodeScalingRuntimeSyncRepoClonesRepository(t *testing.T) {
 	sourceDir := t.TempDir()
 	repo := initGitRepo(t, sourceDir)

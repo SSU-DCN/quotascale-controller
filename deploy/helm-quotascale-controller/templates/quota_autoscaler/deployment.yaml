@@ -35,6 +35,22 @@ spec:
             - --enable-node-scaling={{ $container.enableNodeScaling | default false }}
             - --quota-check-interval={{ $container.quotaCheckInterval | default "1m" }}
             - --quota-update-interval={{ $container.quotaUpdateInterval | default "1m" }}
+            - --node-scaling-max-nodes={{ $container.nodeScalingMaxNodes | default 3 }}
+{{- if $container.nodeScalingRepoURL }}
+            - --node-scaling-repo-url={{ $container.nodeScalingRepoURL }}
+{{- end }}
+{{- if $container.nodeScalingRepoBranch }}
+            - --node-scaling-repo-branch={{ $container.nodeScalingRepoBranch }}
+{{- end }}
+{{- if $container.nodeScalingRepoFilePath }}
+            - --node-scaling-repo-file-path={{ $container.nodeScalingRepoFilePath }}
+{{- end }}
+{{- if $container.nodeScalingGitUsername }}
+            - --node-scaling-git-username={{ $container.nodeScalingGitUsername }}
+{{- end }}
+{{- if $container.nodeScalingGitPassword }}
+            - --node-scaling-git-password={{ $container.nodeScalingGitPassword }}
+{{- end }}
 {{- if $container.gitopsSecretName }}
           envFrom:
             - secretRef:

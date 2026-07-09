@@ -5,6 +5,12 @@ containers:
     repository: "some-private-registry.ing.com/quotascale-controller" # Build your own image with your own resize endpoint.
     tag: "latest"
     enableNodeScaling: false
+    nodeScalingMaxNodes: 3
+    nodeScalingRepoURL: ""
+    nodeScalingRepoBranch: ""
+    nodeScalingRepoFilePath: ""
+    nodeScalingGitUsername: ""
+    nodeScalingGitPassword: ""
     gitopsSecretName: ""
     quotaCheckInterval: "1m"
     quotaUpdateInterval: "1m"

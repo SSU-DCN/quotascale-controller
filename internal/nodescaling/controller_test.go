@@ -183,6 +183,7 @@ func TestNodeScalingControllerReconcileScaleOutActivatesInventoryNodeAndIncremen
 		},
 		RepoDir: repoDir,
 	}, client, store, time.Minute)
+	controller.SetMaxNodeCount(10)
 
 	err := controller.ReconcileScaleOut(ScaleOutRequest{
 		Namespace: "default",
@@ -218,6 +219,76 @@ func TestNodeScalingControllerReconcileScaleOutActivatesInventoryNodeAndIncremen
 	}
 	if store.inventory.Spec.MachineDeploymentReplicas != 4 {
 		t.Fatalf("expected inventory replicas to be updated to 4, got %d", store.inventory.Spec.MachineDeploymentReplicas)
+	}
+}
+
+func TestNodeScalingControllerReconcileScaleOutHonorsMaxNodeCount(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 3,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: false},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{
+					{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule},
+				},
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, client, store, time.Minute)
+	controller.SetMaxNodeCount(3)
+
+	err := controller.ReconcileScaleOut(ScaleOutRequest{
+		Namespace: "default",
+		Reason:    "capacity exceeded",
+	})
+	if err == nil {
+		t.Fatalf("expected reconcile to fail at max node count")
+	}
+
+	replicas, readErr := controller.runtime.ReadMachineDeploymentReplicas()
+	if readErr != nil {
+		t.Fatalf("expected replica read to succeed, got error: %v", readErr)
+	}
+	if replicas != 3 {
+		t.Fatalf("expected replicas to stay at 3, got %d", replicas)
+	}
+	if store.inventory.Spec.Nodes[0].Used {
+		t.Fatalf("expected inventory node to remain unused when max node count is reached")
+	}
+
+	node, getErr := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatalf("expected node read to succeed, got error: %v", getErr)
+	}
+	if _, exists := node.Labels["role"]; !exists {
+		t.Fatalf("expected scaling reservation labels to remain untouched when max node count is reached")
+	}
+	if len(node.Spec.Taints) != 1 || node.Spec.Taints[0].Key != "node-role.kubernetes.io/scaling" {
+		t.Fatalf("expected scaling taint to remain untouched, got taints %#v", node.Spec.Taints)
 	}
 }
 

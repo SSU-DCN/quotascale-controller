@@ -25,6 +25,12 @@ func main() {
 	quotaCheckInterval := flag.Duration("quota-check-interval", time.Minute, "Interval for polling ResourceQuota usage for every QuotaAutoscaler.")
 	quotaUpdateInterval := flag.Duration("quota-update-interval", time.Minute, "Minimum interval between resize requests for the same namespace.")
 	nodeScaleInDelay := flag.Duration("node-scale-in-delay", 5*time.Minute, "How long scale-in eligibility must remain true before the node scaling controller triggers scale-in.")
+	nodeScalingMaxNodes := flag.Int("node-scaling-max-nodes", 3, "Maximum MachineDeployment replica count allowed for node scaling.")
+	nodeScalingRepoURL := flag.String("node-scaling-repo-url", "", "Git repository URL for node scaling MachineDeployment manifests. Overrides GITEA_REPO_URL when set.")
+	nodeScalingRepoBranch := flag.String("node-scaling-repo-branch", "", "Git branch for node scaling manifests. Overrides GITEA_REPO_BRANCH when set.")
+	nodeScalingRepoFilePath := flag.String("node-scaling-repo-file-path", "", "Path to the MachineDeployment manifest inside the node scaling repo. Overrides GITEA_REPO_FILE_PATH when set.")
+	nodeScalingGitUsername := flag.String("node-scaling-git-username", "", "Git username for node scaling repo access. Overrides GITEA_USERNAME when set.")
+	nodeScalingGitPassword := flag.String("node-scaling-git-password", "", "Git password or token for node scaling repo access. Overrides GITEA_PASSWORD when set.")
 	flag.Parse()
 
 	config, err := kubeconfig.GetKubeConfig()
@@ -46,7 +52,13 @@ func main() {
 		panic(err)
 	}
 
-	nodeScalingRuntime, err := nodescaling.InitializeNodeScaling(*enableNodeScaling)
+	nodeScalingRuntime, err := nodescaling.InitializeNodeScaling(*enableNodeScaling, nodescaling.NodeScalingConfig{
+		RepoURL:      *nodeScalingRepoURL,
+		RepoBranch:   *nodeScalingRepoBranch,
+		RepoFilePath: *nodeScalingRepoFilePath,
+		Username:     *nodeScalingGitUsername,
+		Password:     *nodeScalingGitPassword,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -60,6 +72,7 @@ func main() {
 		)
 		nodeScalingController.SetQuotaAutoscalerClient(ichpClient)
 		nodeScalingController.SetScaleInTriggerDelay(*nodeScaleInDelay)
+		nodeScalingController.SetMaxNodeCount(int32(*nodeScalingMaxNodes))
 		scaleOutRequestHandler = nodeScalingController
 		go nodeScalingController.Run()
 	}
