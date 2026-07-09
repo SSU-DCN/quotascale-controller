@@ -134,7 +134,20 @@ func (runtime *NodeScalingRuntime) SyncRepo() error {
 			)
 			return nil
 		}
-		return runtime.pullRepo()
+		if err := runtime.pullRepo(); err != nil {
+			if fallbackErr := runtime.ensureLocalMachineDeploymentReadable(); fallbackErr == nil {
+				logging.LogError(
+					"Node scaling repo pull failed for %s in %s, but using existing local repo because %s is readable: %s",
+					runtime.Config.RepoURL,
+					runtime.RepoDir,
+					runtime.MachineDeploymentFilePath(),
+					err.Error(),
+				)
+				return nil
+			}
+			return err
+		}
+		return nil
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -192,6 +205,11 @@ func (runtime *NodeScalingRuntime) pullRepo() error {
 	if err == git.NoErrAlreadyUpToDate {
 		return nil
 	}
+	return err
+}
+
+func (runtime *NodeScalingRuntime) ensureLocalMachineDeploymentReadable() error {
+	_, err := runtime.ReadMachineDeploymentReplicas()
 	return err
 }
 

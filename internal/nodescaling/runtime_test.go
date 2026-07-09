@@ -127,6 +127,38 @@ func TestNodeScalingRuntimeSyncRepoSkipsImmediatePullAfterClone(t *testing.T) {
 	}
 }
 
+func TestNodeScalingRuntimeSyncRepoFallsBackToExistingLocalRepoWhenPullFails(t *testing.T) {
+	repoDir := t.TempDir()
+	repo := initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+	commitFile(t, repo, defaultNodeScalingFile, "initial commit")
+	checkoutBranch(t, repo, defaultNodeScalingBranch)
+
+	runtime := &NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			Enabled:      true,
+			RepoURL:      "http://invalid.example.local/repo.git",
+			RepoBranch:   defaultNodeScalingBranch,
+			RepoFilePath: defaultNodeScalingFile,
+			Username:     "user",
+			Password:     "pass",
+		},
+		RepoDir: repoDir,
+	}
+
+	if err := runtime.SyncRepo(); err != nil {
+		t.Fatalf("expected sync to fall back to the existing local repo, got error: %v", err)
+	}
+
+	replicas, err := runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected local manifest to stay readable, got error: %v", err)
+	}
+	if replicas != 3 {
+		t.Fatalf("expected replicas to remain 3 from the local manifest, got %d", replicas)
+	}
+}
+
 func TestWriteMachineDeploymentReplicasUpdatesSpecReplicas(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
