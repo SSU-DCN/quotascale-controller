@@ -16,7 +16,6 @@ import (
 
 const (
 	defaultNodeScalingInventoryName = "default"
-	scalingNodeLabelSelector        = "role=scaling"
 )
 
 var nodeScalingInventoryGVR = schema.GroupVersionResource{

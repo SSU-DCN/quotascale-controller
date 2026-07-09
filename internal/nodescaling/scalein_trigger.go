@@ -24,6 +24,14 @@ func (controller *NodeScalingController) EvaluateAutomaticScaleIn() error {
 	if controller.hasActiveScaleInWaiters() {
 		return nil
 	}
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		return err
+	}
+	if replicas <= minNodeCount {
+		controller.resetScaleInTrigger()
+		return nil
+	}
 
 	evaluation, err := controller.EvaluateScaleInCapacity()
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 const (
 	defaultScaleInTriggerDelay = 5 * time.Minute
 	defaultMaxNodeCount        = int32(3)
+	minNodeCount               = int32(1)
 )
 
 type ScaleOutRequest struct {
@@ -258,6 +259,20 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		return fmt.Errorf("kubernetes client is not configured for node scaling")
 	}
 
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		return err
+	}
+	if replicas <= minNodeCount {
+		logging.LogInfo(
+			"[%s] Node scale-in skipped (reason: %s). MachineDeployment replicas already at minimum baseline %d",
+			request.Namespace,
+			request.Reason,
+			minNodeCount,
+		)
+		return nil
+	}
+
 	if err := controller.syncRepoIfConfigured(); err != nil {
 		return err
 	}
@@ -289,14 +304,14 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		}
 	}
 
-	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	replicas, err = controller.runtime.ReadMachineDeploymentReplicas()
 	if err != nil {
 		return err
 	}
 
 	targetReplicas := replicas - int32(unusedCount)
-	if targetReplicas < 0 {
-		targetReplicas = 0
+	if targetReplicas < minNodeCount {
+		targetReplicas = minNodeCount
 	}
 	if targetReplicas != replicas {
 		if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
@@ -364,15 +379,16 @@ func (controller *NodeScalingController) SyncScalingNodeInventory() error {
 		return err
 	}
 
-	nodes, err := controller.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{
-		LabelSelector: scalingNodeLabelSelector,
-	})
+	nodes, err := controller.client.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
 	nodeNames := make([]string, 0, len(nodes.Items))
 	for _, node := range nodes.Items {
+		if !nodeHasScalingRole(node) {
+			continue
+		}
 		nodeNames = append(nodeNames, node.Name)
 	}
 	sort.Strings(nodeNames)

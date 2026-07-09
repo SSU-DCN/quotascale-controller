@@ -105,7 +105,7 @@ func TestNodeScalingControllerSyncScalingNodeInventoryUsesScalingNodes(t *testin
 		&v12.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   "node-b",
-				Labels: map[string]string{"role": "scaling"},
+				Labels: map[string]string{"node-role.kubernetes.io/scaling": ""},
 			},
 		},
 		&v12.Node{
@@ -141,6 +141,39 @@ func TestNodeScalingControllerSyncScalingNodeInventoryUsesScalingNodes(t *testin
 	}
 	if len(store.nodes) != 2 || store.nodes[0] != "node-a" || store.nodes[1] != "node-b" {
 		t.Fatalf("unexpected nodes recorded: %#v", store.nodes)
+	}
+}
+
+func TestNodeScalingControllerSyncScalingNodeInventoryUsesScalingTaint(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
+
+	store := &captureNodeScalingInventoryStore{}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-tainted",
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{
+					{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule},
+				},
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, client, store, time.Minute)
+
+	if err := controller.SyncScalingNodeInventory(); err != nil {
+		t.Fatalf("expected inventory sync to succeed, got error: %v", err)
+	}
+	if len(store.nodes) != 1 || store.nodes[0] != "node-tainted" {
+		t.Fatalf("expected tainted scaling node to be recorded, got %#v", store.nodes)
 	}
 }
 
@@ -576,6 +609,48 @@ func TestNodeScalingControllerReconcileScaleInReturnsDeferredErrorWhenWaitingFor
 	}
 }
 
+func TestNodeScalingControllerReconcileScaleInSkipsAtMinimumBaseline(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(1))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 1,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: false},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoURL:      "http://invalid.example.local/repo.git",
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+
+	if err := controller.ReconcileScaleIn(ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	}); err != nil {
+		t.Fatalf("expected scale-in to be skipped cleanly at minimum baseline, got error: %v", err)
+	}
+
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected replica read to succeed, got error: %v", err)
+	}
+	if replicas != 1 {
+		t.Fatalf("expected replicas to stay at baseline 1, got %d", replicas)
+	}
+}
+
 func TestNodeScalingControllerEvaluateAutomaticScaleInQueuesRequestAfterDelay(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		&v12.Node{
@@ -627,7 +702,11 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInQueuesRequestAfterDelay(t 
 	controller := NewNodeScalingController(nil, client, nil, time.Minute)
 	controller.SetQuotaAutoscalerClient(scalerClient)
 	controller.SetScaleInTriggerDelay(time.Minute)
-	controller.runtime = &NodeScalingRuntime{}
+	controller.runtime = &NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: t.TempDir(),
+	}
+	writeFile(t, filepath.Join(controller.runtime.RepoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
 
 	if err := controller.EvaluateAutomaticScaleIn(); err != nil {
 		t.Fatalf("expected first automatic scale-in evaluation to succeed, got error: %v", err)
@@ -648,5 +727,61 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInQueuesRequestAfterDelay(t 
 		}
 	default:
 		t.Fatalf("expected automatic scale-in request to be queued")
+	}
+}
+
+func TestNodeScalingControllerEvaluateAutomaticScaleInSkipsAtMinimumBaseline(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("4"),
+					v12.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+		&v12.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "quota-a",
+				Namespace: "default",
+			},
+			Spec: v12.ResourceQuotaSpec{
+				Hard: v12.ResourceList{
+					v12.ResourceLimitsCPU:    resource.MustParse("2"),
+					v12.ResourceLimitsMemory: resource.MustParse("2Gi"),
+				},
+			},
+		},
+	)
+	scalerClient := scalerfake.NewSimpleClientset(
+		&scalerv1.QuotaAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "scaler-a",
+				Namespace: "default",
+			},
+			Spec: scalerv1.QuotaAutoscalerSpec{
+				ResourceQuota: "quota-a",
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	controller.SetQuotaAutoscalerClient(scalerClient)
+	controller.SetScaleInTriggerDelay(time.Minute)
+	controller.runtime = &NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: t.TempDir(),
+	}
+	writeFile(t, filepath.Join(controller.runtime.RepoDir, defaultNodeScalingFile), machineDeploymentYAML(1))
+
+	controller.scaleInEligibleSince = time.Now().Add(-2 * time.Minute)
+	if err := controller.EvaluateAutomaticScaleIn(); err != nil {
+		t.Fatalf("expected automatic scale-in evaluation to skip cleanly at minimum baseline, got error: %v", err)
+	}
+	select {
+	case request := <-controller.scaleInRequests:
+		t.Fatalf("expected no automatic scale-in request at minimum baseline, got %#v", request)
+	default:
 	}
 }
