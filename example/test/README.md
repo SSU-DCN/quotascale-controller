@@ -25,6 +25,18 @@ This guide assumes a very fresh Kubernetes cluster where the base control plane
 is already working and a CNI plugin has been installed, but common add-ons such
 as `metrics-server` are not installed yet.
 
+## Cluster Spec
+
+| Role | Instance Type | vCPU | Memory | Count | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Master node | `t3.large` | `2` | `8 GiB` | `1` | Kubernetes control plane host |
+| Worker node | `c5.4xlarge` | `16` | `32 GiB` | `2` | Default starting worker-node pool for the demo |
+
+These capacities come from the official AWS EC2 instance-type pages:
+
+- `t3.large`: `2 vCPU`, `8 GiB` memory
+- `c5.4xlarge`: `16 vCPU`, `32 GiB` memory
+
 Before applying the demo manifests, make sure you have:
 
 - working `kubectl` access to the cluster
