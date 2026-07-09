@@ -90,6 +90,40 @@ func TestNodeScalingRuntimeSyncRepoClonesRepository(t *testing.T) {
 	if string(content) != machineDeploymentYAML(3) {
 		t.Fatalf("expected cloned content to match source, got %q", string(content))
 	}
+	if !runtime.justCloned {
+		t.Fatalf("expected runtime to record that it just cloned the repo")
+	}
+	if !runtime.skipNextPull {
+		t.Fatalf("expected runtime to skip the next pull immediately after clone")
+	}
+}
+
+func TestNodeScalingRuntimeSyncRepoSkipsImmediatePullAfterClone(t *testing.T) {
+	sourceDir := t.TempDir()
+	repo := initGitRepo(t, sourceDir)
+	writeFile(t, filepath.Join(sourceDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+	commitFile(t, repo, defaultNodeScalingFile, "initial commit")
+	checkoutBranch(t, repo, defaultNodeScalingBranch)
+
+	targetDir := filepath.Join(t.TempDir(), "cloned-repo")
+	runtime := &NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			Enabled:    true,
+			RepoURL:    sourceDir,
+			RepoBranch: defaultNodeScalingBranch,
+		},
+		RepoDir: targetDir,
+	}
+
+	if err := runtime.SyncRepo(); err != nil {
+		t.Fatalf("expected initial clone to succeed, got error: %v", err)
+	}
+	if err := runtime.SyncRepo(); err != nil {
+		t.Fatalf("expected immediate post-clone sync to skip pull successfully, got error: %v", err)
+	}
+	if runtime.skipNextPull {
+		t.Fatalf("expected skipNextPull to be cleared after the skipped sync")
+	}
 }
 
 func TestWriteMachineDeploymentReplicasUpdatesSpecReplicas(t *testing.T) {

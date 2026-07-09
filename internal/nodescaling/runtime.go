@@ -32,8 +32,10 @@ type NodeScalingConfig struct {
 }
 
 type NodeScalingRuntime struct {
-	Config  NodeScalingConfig
-	RepoDir string
+	Config       NodeScalingConfig
+	RepoDir      string
+	justCloned   bool
+	skipNextPull bool
 }
 
 type MachineDeploymentManifest struct {
@@ -120,6 +122,15 @@ func (runtime *NodeScalingRuntime) SyncRepo() error {
 	}
 
 	if _, err := os.Stat(filepath.Join(runtime.RepoDir, ".git")); err == nil {
+		if runtime.skipNextPull {
+			runtime.skipNextPull = false
+			logging.LogInfo(
+				"Skipping immediate node scaling repo pull for %s in %s because this process just cloned it",
+				runtime.Config.RepoURL,
+				runtime.RepoDir,
+			)
+			return nil
+		}
 		return runtime.pullRepo()
 	} else if !os.IsNotExist(err) {
 		return err
@@ -144,7 +155,12 @@ func (runtime *NodeScalingRuntime) cloneRepo() error {
 		Depth:         1,
 		Progress:      os.Stdout,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	runtime.justCloned = true
+	runtime.skipNextPull = true
+	return nil
 }
 
 func (runtime *NodeScalingRuntime) pullRepo() error {
