@@ -201,6 +201,16 @@ spec:
 			t.Fatalf("expected updated manifest to contain %q, got:\n%s", expected, content)
 		}
 	}
+	for _, expected := range []string{
+		"metadata:\n  name: worker-md\n  namespace: default\n",
+		"spec:\n  clusterName: demo\n  replicas: 1\n",
+		"selector:\n    matchLabels:\n      pool: workers\n",
+		"template:\n    spec:\n      version: v1.30.0\n",
+	} {
+		if !contains(content, expected) {
+			t.Fatalf("expected updated manifest to preserve 2-space indentation pattern %q, got:\n%s", expected, content)
+		}
+	}
 }
 
 func contains(s, substr string) bool {

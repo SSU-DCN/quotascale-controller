@@ -1,6 +1,7 @@
 package nodescaling
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -319,12 +320,17 @@ func (runtime *NodeScalingRuntime) WriteMachineDeploymentReplicas(replicas int32
 		return err
 	}
 
-	updatedContent, err := yamlv3.Marshal(&doc)
-	if err != nil {
+	var buffer bytes.Buffer
+	encoder := yamlv3.NewEncoder(&buffer)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(&doc); err != nil {
+		return err
+	}
+	if err := encoder.Close(); err != nil {
 		return err
 	}
 
-	return os.WriteFile(runtime.MachineDeploymentAbsolutePath(), updatedContent, 0o644)
+	return os.WriteFile(runtime.MachineDeploymentAbsolutePath(), buffer.Bytes(), 0o644)
 }
 
 func setSpecReplicas(doc *yamlv3.Node, replicas int32) error {
