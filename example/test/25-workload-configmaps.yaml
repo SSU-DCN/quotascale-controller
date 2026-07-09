@@ -26,15 +26,14 @@ data:
             if parsed.path == "/burn":
                 query = parse_qs(parsed.query)
                 rounds = int(query.get("rounds", [str(DEFAULT_ROUNDS)])[0])
-                payload = query.get("payload", ["quota-test-a"])[0].encode("utf-8")
-                digest = payload
-                for _ in range(rounds):
-                    digest = hashlib.sha256(digest).digest()
+                password = query.get("password", ["quota-test-a"])[0].encode("utf-8")
+                salt = query.get("salt", ["demo-salt-a"])[0].encode("utf-8")
+                digest = hashlib.pbkdf2_hmac("sha512", password, salt, rounds)
                 self.respond(
                     200,
                     {
                         "service": "quota-test-app-a",
-                        "algorithm": "sha256-loop",
+                        "algorithm": "pbkdf2-hmac-sha512",
                         "rounds": rounds,
                         "digest": digest.hex(),
                     },

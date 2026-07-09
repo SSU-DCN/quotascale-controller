@@ -117,7 +117,7 @@ traffic generator machine stays isolated from system Python packages.
 
 ## Workloads
 
-- Namespace A runs a CPU-heavy SHA-256 loop HTTP service
+- Namespace A runs a CPU-heavy PBKDF2-HMAC-SHA512 HTTP service
 - Namespace B runs a CPU-heavy PBKDF2 HTTP service
 
 These were chosen because the demo goal is HPA scale-out on CPU usage while
