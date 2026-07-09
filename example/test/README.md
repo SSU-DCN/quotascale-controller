@@ -44,7 +44,7 @@ The goal is that a third party can look at this folder and see that:
 ## Workloads
 
 - Namespace A runs `podinfo`
-- Namespace B runs `go-httpbin`
+- Namespace B runs `go-httpbin` from Docker Hub (`mccutchen/go-httpbin:2.23.1`)
 
 These were chosen because both are small HTTP services that fit the demo
 resource model, but they are different enough to avoid the impression that
