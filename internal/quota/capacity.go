@@ -42,7 +42,7 @@ func WorkerNodeAvailableResources(client kubernetes.Interface) (resources.Resour
 	workerNodes := map[string]bool{}
 	available := resources.Resources{}
 	for _, node := range nodes.Items {
-		if isControlPlaneNode(node) || node.Spec.Unschedulable {
+		if isControlPlaneNode(node) || node.Spec.Unschedulable || nodeHasScalingRole(node) {
 			continue
 		}
 
@@ -79,6 +79,21 @@ func isControlPlaneNode(node corev1.Node) bool {
 	_, controlPlane := node.Labels["node-role.kubernetes.io/control-plane"]
 	_, master := node.Labels["node-role.kubernetes.io/master"]
 	return controlPlane || master
+}
+
+func nodeHasScalingRole(node corev1.Node) bool {
+	if node.Labels["role"] == "scaling" {
+		return true
+	}
+	if _, ok := node.Labels["node-role.kubernetes.io/scaling"]; ok {
+		return true
+	}
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == "node-role.kubernetes.io/scaling" && taint.Effect == corev1.TaintEffectNoSchedule {
+			return true
+		}
+	}
+	return false
 }
 
 func isTerminalPod(pod corev1.Pod) bool {

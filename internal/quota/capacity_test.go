@@ -34,6 +34,42 @@ func TestWorkerNodeAvailableResourcesExcludesControlPlaneAndAllocatedPods(t *tes
 	}
 }
 
+func TestWorkerNodeAvailableResourcesExcludesScalingNodes(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		node("worker-1", "4", "8Gi", nil),
+		node("scaling-by-role", "4", "8Gi", map[string]string{"role": "scaling"}),
+		node("scaling-by-label", "4", "8Gi", map[string]string{"node-role.kubernetes.io/scaling": ""}),
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "scaling-by-taint"},
+			Spec: corev1.NodeSpec{
+				Taints: []corev1.Taint{
+					{Key: "node-role.kubernetes.io/scaling", Effect: corev1.TaintEffectNoSchedule},
+				},
+			},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+	)
+
+	available, err := WorkerNodeAvailableResources(client)
+	if err != nil {
+		t.Fatalf("expected available resources, got error: %v", err)
+	}
+
+	if available.Cpu != 4000 {
+		t.Fatalf("expected only the non-scaling worker CPU to count, got %dm", available.Cpu)
+	}
+	expectedMemoryQuantity := resource.MustParse("8Gi")
+	expectedMemory := expectedMemoryQuantity.ScaledValue(resource.Mega)
+	if available.Memory != expectedMemory {
+		t.Fatalf("expected only the non-scaling worker memory to count, got %dM", available.Memory)
+	}
+}
+
 func TestEnsureScaleUpFitsClusterRejectsUnavailableCapacity(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		node("worker-1", "4", "4Gi", nil),
