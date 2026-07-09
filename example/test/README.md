@@ -231,9 +231,10 @@ second,rps
 
 The file contains normalized `RPS` values derived from the World Cup logs.
 The Locust runner converts those values into user counts over time. Each user
-is paced with `constant_throughput(1)`, so one user aims to issue roughly one
-task per second. `RPS_SCALE` then scales the replay intensity up or down while
-keeping the original shape.
+is paced with `constant_throughput(10)`, so one user aims to issue roughly ten
+tasks per second. `RPS_SCALE` then scales the replay intensity up or down while
+keeping the original shape. The default replay is intentionally aggressive
+because lightweight Go HTTP services can otherwise sit near idle CPU usage.
 
 This means:
 
@@ -306,7 +307,7 @@ Run namespace A replay:
 
 ```sh
 WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_a.csv \
-RPS_SCALE=6.0 \
+RPS_SCALE=30.0 \
 NODE_IP=<REACHABLE_K8S_NODE_IP> \
 locust -f example/test/locust/locustfile.py \
   --headless \
@@ -318,7 +319,7 @@ Run namespace B replay:
 
 ```sh
 WORLD_CUP_TRACE_CSV=example/test/locust/worldcup_b.csv \
-RPS_SCALE=6.0 \
+RPS_SCALE=30.0 \
 NODE_IP=<REACHABLE_K8S_NODE_IP> \
 locust -f example/test/locust/locustfile.py \
   --headless \

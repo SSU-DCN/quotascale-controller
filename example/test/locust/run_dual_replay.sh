@@ -9,13 +9,13 @@ A_TRACE="${A_TRACE:-example/test/locust/worldcup_a.csv}"
 A_PID_FILE="${A_PID_FILE:-${PID_DIR}/locust-a.pid}"
 A_HOST="${A_HOST:-}"
 A_LOG="${A_LOG:-/tmp/locust-a.log}"
-A_RPS_SCALE="${A_RPS_SCALE:-6.0}"
+A_RPS_SCALE="${A_RPS_SCALE:-30.0}"
 
 B_TRACE="${B_TRACE:-example/test/locust/worldcup_b.csv}"
 B_PID_FILE="${B_PID_FILE:-${PID_DIR}/locust-b.pid}"
 B_HOST="${B_HOST:-}"
 B_LOG="${B_LOG:-/tmp/locust-b.log}"
-B_RPS_SCALE="${B_RPS_SCALE:-6.0}"
+B_RPS_SCALE="${B_RPS_SCALE:-30.0}"
 
 if [[ -z "${A_HOST}" || -z "${B_HOST}" ]]; then
   : "${NODE_IP:?set NODE_IP to a reachable Kubernetes node IP, or set A_HOST/B_HOST explicitly}"
