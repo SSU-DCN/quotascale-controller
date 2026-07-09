@@ -223,18 +223,35 @@ func (runtime *NodeScalingRuntime) CommitAndPush(message string) error {
 		return err
 	}
 
-	if _, err := worktree.Commit(message, &git.CommitOptions{
+	commitHash, err := worktree.Commit(message, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  runtime.Config.Username,
 			Email: fmt.Sprintf("%s@gitea.local", runtime.Config.Username),
 		},
+	})
+	if err != nil {
+		return err
+	}
+	logging.LogInfo(
+		"Committed node scaling manifest change for %s in %s with message %q at %s",
+		runtime.MachineDeploymentFilePath(),
+		runtime.Config.RepoURL,
+		message,
+		commitHash.String(),
+	)
+
+	if err := repo.Push(&git.PushOptions{
+		Auth: runtime.auth(),
 	}); err != nil {
 		return err
 	}
-
-	return repo.Push(&git.PushOptions{
-		Auth: runtime.auth(),
-	})
+	logging.LogInfo(
+		"Pushed node scaling manifest change for %s to %s on branch %s",
+		runtime.MachineDeploymentFilePath(),
+		runtime.Config.RepoURL,
+		runtime.Config.RepoBranch,
+	)
+	return nil
 }
 
 func (runtime *NodeScalingRuntime) MachineDeploymentFilePath() string {
