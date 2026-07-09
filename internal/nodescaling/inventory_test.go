@@ -117,6 +117,32 @@ func TestFindHighestOrderUsedInventoryNodeReturnsHighestOrderUsedNode(t *testing
 	}
 }
 
+func TestFindHighestOrderUsedInventoryNodesReturnsMultipleHighestOrderUsedNodes(t *testing.T) {
+	inventory := &inventoryv1.NodeScalingInventory{
+		Spec: inventoryv1.NodeScalingInventorySpec{
+			Nodes: []inventoryv1.NodeScalingInventoryNode{
+				{Name: "node-a", Order: 1, Used: true},
+				{Name: "node-d", Order: 4, Used: false},
+				{Name: "node-c", Order: 3, Used: true},
+				{Name: "node-b", Order: 2, Used: true},
+			},
+		},
+	}
+
+	got, err := FindHighestOrderUsedInventoryNodes(inventory, 2)
+	if err != nil {
+		t.Fatalf("expected used node selection to succeed, got error: %v", err)
+	}
+
+	want := []inventoryv1.NodeScalingInventoryNode{
+		{Name: "node-c", Order: 3, Used: true},
+		{Name: "node-b", Order: 2, Used: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected highest-order used nodes: %#v", got)
+	}
+}
+
 func TestCountUnusedInventoryNodes(t *testing.T) {
 	inventory := &inventoryv1.NodeScalingInventory{
 		Spec: inventoryv1.NodeScalingInventorySpec{

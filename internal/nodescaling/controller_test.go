@@ -443,6 +443,103 @@ func TestNodeScalingControllerReconcileScaleOutReusesActiveScaleInWaiterNode(t *
 	}
 }
 
+func TestNodeScalingControllerReconcileScaleOutReusesLowestOrderActiveScaleInWaiterNode(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 3,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: true},
+					{Name: "node-b", Order: 2, Used: true},
+					{Name: "node-c", Order: 3, Used: true},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-b",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-c",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+	for _, nodeName := range []string{"node-a", "node-b", "node-c"} {
+		controller.StartScaleInWaiter(nodeName, ScaleInRequest{
+			Namespace: "default",
+			Reason:    "quota scaled down",
+		})
+	}
+
+	err := controller.ReconcileScaleOut(ScaleOutRequest{
+		Namespace: "default",
+		Reason:    "capacity exceeded",
+	})
+	if err != nil {
+		t.Fatalf("expected reconcile to succeed, got error: %v", err)
+	}
+
+	reusedNode, err := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected reused node read to succeed, got error: %v", err)
+	}
+	if _, exists := reusedNode.Labels["role"]; exists {
+		t.Fatalf("expected reused node role label to be removed, got labels %#v", reusedNode.Labels)
+	}
+
+	controller.scaleInWaitersMu.Lock()
+	_, nodeAWaiterActive := controller.scaleInWaiters["node-a"]
+	_, nodeBWaiterActive := controller.scaleInWaiters["node-b"]
+	_, nodeCWaiterActive := controller.scaleInWaiters["node-c"]
+	controller.scaleInWaitersMu.Unlock()
+	if nodeAWaiterActive {
+		t.Fatalf("expected scale-in waiter to be stopped for lowest-order node-a")
+	}
+	if !nodeBWaiterActive || !nodeCWaiterActive {
+		t.Fatalf("expected higher-order scale-in waiters to continue running")
+	}
+}
+
 func TestNodeScalingControllerReconcileScaleInShrinksReplicasAndReservesHighestUsedNode(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(5))
@@ -460,6 +557,7 @@ func TestNodeScalingControllerReconcileScaleInShrinksReplicasAndReservesHighestU
 		},
 	}
 	client := fake.NewSimpleClientset(
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
 		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}},
 	)
 
@@ -499,6 +597,14 @@ func TestNodeScalingControllerReconcileScaleInShrinksReplicasAndReservesHighestU
 	}
 	if len(node.Spec.Taints) != 1 || node.Spec.Taints[0].Key != "node-role.kubernetes.io/scaling" {
 		t.Fatalf("expected scaling taint on reserved node, got %#v", node.Spec.Taints)
+	}
+
+	nodeA, err := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected node read to succeed, got error: %v", err)
+	}
+	if nodeA.Labels["role"] != "scaling" {
+		t.Fatalf("expected additional used node to be reserved too, got %#v", nodeA.Labels)
 	}
 }
 
@@ -570,6 +676,139 @@ func TestNodeScalingControllerProcessScaleInWaiterMarksNodeUnusedAndRequeues(t *
 	}
 }
 
+func TestNodeScalingControllerNodeHasBlockingPodsIgnoresExemptPods(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "daemon-pod",
+				Namespace: "kube-system",
+				OwnerReferences: []metav1.OwnerReference{
+					{Kind: "DaemonSet", Name: "node-agent"},
+				},
+			},
+			Spec:   v12.PodSpec{NodeName: "node-a"},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "infra-pod",
+				Namespace: "monitoring",
+			},
+			Spec:   v12.PodSpec{NodeName: "node-a"},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "annotated-pod",
+				Namespace: "app",
+				Annotations: map[string]string{
+					defaultScaleInExemptPodKey: "true",
+				},
+			},
+			Spec:   v12.PodSpec{NodeName: "node-a"},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "terminating-pod",
+				Namespace:   "app",
+				Annotations: map[string]string{"kubernetes.io/config.mirror": "mirror-node-a"},
+				DeletionTimestamp: &metav1.Time{
+					Time: time.Now(),
+				},
+			},
+			Spec:   v12.PodSpec{NodeName: "node-a"},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+	)
+
+	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	controller.SetScaleInExemptNamespaces([]string{"kube-system", "monitoring"})
+
+	hasBlockingPods, err := controller.NodeHasBlockingPods("node-a")
+	if err != nil {
+		t.Fatalf("expected blocking pod check to succeed, got error: %v", err)
+	}
+	if hasBlockingPods {
+		t.Fatalf("expected only exempt pods to remain on node-a")
+	}
+}
+
+func TestNodeScalingControllerProcessScaleInWaiterForcesScaleInAfterTimeout(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 2,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: true},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "middleware-pod",
+				Namespace: "app",
+			},
+			Spec:   v12.PodSpec{NodeName: "node-a"},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+	controller.SetScaleInForceDelay(time.Minute)
+	controller.StartScaleInWaiter("node-a", ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	})
+	controller.scaleInWaitersMu.Lock()
+	waiter := controller.scaleInWaiters["node-a"]
+	waiter.startedAt = time.Now().Add(-2 * time.Minute)
+	controller.scaleInWaiters["node-a"] = waiter
+	controller.scaleInWaitersMu.Unlock()
+
+	done, err := controller.ProcessScaleInWaiter("node-a", ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	})
+	if err != nil {
+		t.Fatalf("expected forced scale-in waiter processing to succeed, got error: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected waiter processing to complete after force timeout")
+	}
+	if store.inventory.Spec.Nodes[0].Used {
+		t.Fatalf("expected timed-out node to be marked unused")
+	}
+	select {
+	case request := <-controller.scaleInRequests:
+		if request.Namespace != "default" {
+			t.Fatalf("unexpected requeued request: %#v", request)
+		}
+	default:
+		t.Fatalf("expected scale-in request to be requeued after timeout")
+	}
+}
+
 func TestNodeScalingControllerReconcileScaleInReturnsDeferredErrorWhenWaitingForDrain(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
@@ -606,6 +845,52 @@ func TestNodeScalingControllerReconcileScaleInReturnsDeferredErrorWhenWaitingFor
 	var deferredErr *NodeScalingDeferredError
 	if !errors.As(err, &deferredErr) {
 		t.Fatalf("expected deferred error type, got %T: %v", err, err)
+	}
+}
+
+func TestNodeScalingControllerReconcileScaleInReservesMultipleNodesAtOnce(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(4))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 4,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: true},
+					{Name: "node-b", Order: 2, Used: true},
+					{Name: "node-c", Order: 3, Used: true},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+
+	err := controller.ReconcileScaleIn(ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	})
+	if err == nil {
+		t.Fatalf("expected deferred error while draining reserved nodes")
+	}
+
+	for _, nodeName := range []string{"node-a", "node-b", "node-c"} {
+		node, getErr := client.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		if getErr != nil {
+			t.Fatalf("expected node %s read to succeed, got error: %v", nodeName, getErr)
+		}
+		if node.Labels["role"] != "scaling" {
+			t.Fatalf("expected node %s to be reserved for concurrent scale-in, got labels %#v", nodeName, node.Labels)
+		}
 	}
 }
 
@@ -783,5 +1068,50 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInSkipsAtMinimumBaseline(t *
 	case request := <-controller.scaleInRequests:
 		t.Fatalf("expected no automatic scale-in request at minimum baseline, got %#v", request)
 	default:
+	}
+}
+
+func TestNodeScalingControllerNonScalingWorkerNodeCapacityIncludesLabelOnlyScalingNodes(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "worker-1",
+				Labels: map[string]string{"role": "scaling"},
+			},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("4"),
+					v12.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-2"},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{
+					{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule},
+				},
+			},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("4"),
+					v12.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	capacity, err := controller.NonScalingWorkerNodeCapacity()
+	if err != nil {
+		t.Fatalf("expected capacity evaluation to succeed, got error: %v", err)
+	}
+	if capacity.Cpu != 4000 {
+		t.Fatalf("expected label-only scaling node to count toward CPU capacity, got %dm", capacity.Cpu)
+	}
+	expectedMemoryQuantity := resource.MustParse("8Gi")
+	expectedMemory := expectedMemoryQuantity.ScaledValue(resource.Mega)
+	if capacity.Memory != expectedMemory {
+		t.Fatalf("expected only taint-free node memory to count, got %dM", capacity.Memory)
 	}
 }

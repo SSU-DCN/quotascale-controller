@@ -7,6 +7,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
@@ -25,6 +26,10 @@ func main() {
 	quotaCheckInterval := flag.Duration("quota-check-interval", time.Minute, "Interval for polling ResourceQuota usage for every QuotaAutoscaler.")
 	quotaUpdateInterval := flag.Duration("quota-update-interval", time.Minute, "Minimum interval between resize requests for the same namespace.")
 	nodeScaleInDelay := flag.Duration("node-scale-in-delay", 5*time.Minute, "How long scale-in eligibility must remain true before the node scaling controller triggers scale-in.")
+	nodeScaleInForceDelay := flag.Duration("node-scale-in-force-delay", 5*time.Minute, "How long a reserved scale-in node may keep blocking pods before the controller forces scale-in anyway.")
+	nodeScaleInExemptNamespaces := flag.String("node-scale-in-exempt-namespaces", "kube-system", "Comma-separated namespaces whose pods should not block node scale-in.")
+	nodeScaleInExemptPodKey := flag.String("node-scale-in-exempt-pod-key", "quotascale.dcn.ssu.ac.kr/scale-in-exempt", "Label or annotation key marking pods that should not block node scale-in.")
+	nodeScaleInExemptPodValue := flag.String("node-scale-in-exempt-pod-value", "true", "Label or annotation value marking pods that should not block node scale-in.")
 	nodeScalingMaxNodes := flag.Int("node-scaling-max-nodes", 3, "Maximum MachineDeployment replica count allowed for node scaling.")
 	nodeScalingRepoURL := flag.String("node-scaling-repo-url", "", "Git repository URL for node scaling MachineDeployment manifests. Overrides GITEA_REPO_URL when set.")
 	nodeScalingRepoBranch := flag.String("node-scaling-repo-branch", "", "Git branch for node scaling manifests. Overrides GITEA_REPO_BRANCH when set.")
@@ -72,6 +77,9 @@ func main() {
 		)
 		nodeScalingController.SetQuotaAutoscalerClient(ichpClient)
 		nodeScalingController.SetScaleInTriggerDelay(*nodeScaleInDelay)
+		nodeScalingController.SetScaleInForceDelay(*nodeScaleInForceDelay)
+		nodeScalingController.SetScaleInExemptNamespaces(strings.Split(*nodeScaleInExemptNamespaces, ","))
+		nodeScalingController.SetScaleInExemptPodMarker(*nodeScaleInExemptPodKey, *nodeScaleInExemptPodValue)
 		nodeScalingController.SetMaxNodeCount(int32(*nodeScalingMaxNodes))
 		scaleOutRequestHandler = nodeScalingController
 		go nodeScalingController.Run()

@@ -34,7 +34,7 @@ func TestWorkerNodeAvailableResourcesExcludesControlPlaneAndAllocatedPods(t *tes
 	}
 }
 
-func TestWorkerNodeAvailableResourcesExcludesScalingNodes(t *testing.T) {
+func TestWorkerNodeAvailableResourcesExcludesOnlyScalingTaintedNodes(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		node("worker-1", "4", "8Gi", nil),
 		node("scaling-by-role", "4", "8Gi", map[string]string{"role": "scaling"}),
@@ -60,13 +60,13 @@ func TestWorkerNodeAvailableResourcesExcludesScalingNodes(t *testing.T) {
 		t.Fatalf("expected available resources, got error: %v", err)
 	}
 
-	if available.Cpu != 4000 {
-		t.Fatalf("expected only the non-scaling worker CPU to count, got %dm", available.Cpu)
+	if available.Cpu != 12000 {
+		t.Fatalf("expected taint-free labeled nodes to count toward CPU, got %dm", available.Cpu)
 	}
-	expectedMemoryQuantity := resource.MustParse("8Gi")
+	expectedMemoryQuantity := resource.MustParse("24Gi")
 	expectedMemory := expectedMemoryQuantity.ScaledValue(resource.Mega)
 	if available.Memory != expectedMemory {
-		t.Fatalf("expected only the non-scaling worker memory to count, got %dM", available.Memory)
+		t.Fatalf("expected taint-free labeled nodes to count toward memory, got %dM", available.Memory)
 	}
 }
 

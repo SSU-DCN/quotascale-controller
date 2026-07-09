@@ -118,7 +118,7 @@ func (controller *NodeScalingController) NonScalingWorkerNodeCapacity() (resourc
 
 	total := resources.Resources{}
 	for _, node := range nodes.Items {
-		if isControlPlaneNode(node) || node.Spec.Unschedulable || nodeHasScalingRole(node) {
+		if isControlPlaneNode(node) || node.Spec.Unschedulable || nodeHasScalingTaint(node) {
 			continue
 		}
 
@@ -142,6 +142,15 @@ func nodeHasScalingRole(node v12.Node) bool {
 	if _, ok := node.Labels["node-role.kubernetes.io/scaling"]; ok {
 		return true
 	}
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == "node-role.kubernetes.io/scaling" && taint.Effect == v12.TaintEffectNoSchedule {
+			return true
+		}
+	}
+	return false
+}
+
+func nodeHasScalingTaint(node v12.Node) bool {
 	for _, taint := range node.Spec.Taints {
 		if taint.Key == "node-role.kubernetes.io/scaling" && taint.Effect == v12.TaintEffectNoSchedule {
 			return true

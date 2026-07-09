@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +20,10 @@ import (
 
 const (
 	defaultScaleInTriggerDelay = 5 * time.Minute
+	defaultScaleInForceDelay   = 5 * time.Minute
 	defaultMaxNodeCount        = int32(3)
 	minNodeCount               = int32(1)
+	defaultScaleInExemptPodKey = "quotascale.dcn.ssu.ac.kr/scale-in-exempt"
 )
 
 type ScaleOutRequest struct {
@@ -58,12 +61,21 @@ type NodeScalingController struct {
 	inventoryStore        NodeScalingInventoryStore
 	inventorySyncInterval time.Duration
 	scaleInTriggerDelay   time.Duration
+	scaleInForceDelay     time.Duration
 	maxNodeCount          int32
+	scaleInExemptKey      string
+	scaleInExemptValue    string
+	scaleInExemptNS       map[string]struct{}
 	scaleInEligibleSince  time.Time
 	scaleOutRequests      chan ScaleOutRequest
 	scaleInRequests       chan ScaleInRequest
-	scaleInWaiters        map[string]context.CancelFunc
+	scaleInWaiters        map[string]scaleInWaiter
 	scaleInWaitersMu      sync.Mutex
+}
+
+type scaleInWaiter struct {
+	cancel    context.CancelFunc
+	startedAt time.Time
 }
 
 func NewNodeScalingController(runtime *NodeScalingRuntime, client kubernetes.Interface, inventoryStore NodeScalingInventoryStore, inventorySyncInterval time.Duration) *NodeScalingController {
@@ -76,10 +88,16 @@ func NewNodeScalingController(runtime *NodeScalingRuntime, client kubernetes.Int
 		inventoryStore:        inventoryStore,
 		inventorySyncInterval: inventorySyncInterval,
 		scaleInTriggerDelay:   defaultScaleInTriggerDelay,
+		scaleInForceDelay:     defaultScaleInForceDelay,
 		maxNodeCount:          defaultMaxNodeCount,
+		scaleInExemptKey:      defaultScaleInExemptPodKey,
+		scaleInExemptValue:    "true",
+		scaleInExemptNS: map[string]struct{}{
+			"kube-system": {},
+		},
 		scaleOutRequests:      make(chan ScaleOutRequest, 128),
 		scaleInRequests:       make(chan ScaleInRequest, 128),
-		scaleInWaiters:        map[string]context.CancelFunc{},
+		scaleInWaiters:        map[string]scaleInWaiter{},
 	}
 }
 
@@ -99,6 +117,38 @@ func (controller *NodeScalingController) SetMaxNodeCount(count int32) {
 		count = defaultMaxNodeCount
 	}
 	controller.maxNodeCount = count
+}
+
+func (controller *NodeScalingController) SetScaleInForceDelay(delay time.Duration) {
+	if delay <= 0 {
+		delay = defaultScaleInForceDelay
+	}
+	controller.scaleInForceDelay = delay
+}
+
+func (controller *NodeScalingController) SetScaleInExemptNamespaces(namespaces []string) {
+	exempt := map[string]struct{}{}
+	for _, namespace := range namespaces {
+		namespace = strings.TrimSpace(namespace)
+		if namespace == "" {
+			continue
+		}
+		exempt[namespace] = struct{}{}
+	}
+	controller.scaleInExemptNS = exempt
+}
+
+func (controller *NodeScalingController) SetScaleInExemptPodMarker(key, value string) {
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	if key == "" {
+		key = defaultScaleInExemptPodKey
+	}
+	if value == "" {
+		value = "true"
+	}
+	controller.scaleInExemptKey = key
+	controller.scaleInExemptValue = value
 }
 
 func (controller *NodeScalingController) HandleScaleOutRequest(request ScaleOutRequest) error {
@@ -284,23 +334,17 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 
 	unusedCount := CountUnusedInventoryNodes(inventory)
 	if unusedCount == 0 {
-		node, err := FindHighestOrderUsedInventoryNode(inventory)
+		reservedNodes, err := controller.reserveScaleInCandidates(inventory, int(replicas-minNodeCount), request)
 		if err != nil {
 			return err
 		}
-
-		alreadyReserved, err := controller.NodeHasScalingReservation(node.Name)
-		if err != nil {
-			return err
-		}
-		if !alreadyReserved {
-			if err := controller.ReserveScalingNode(node.Name); err != nil {
-				return err
+		if len(reservedNodes) == 0 {
+			return &NodeScalingDeferredError{
+				Reason: "waiting for reserved scaling nodes to finish draining",
 			}
 		}
-		controller.StartScaleInWaiter(node.Name, request)
 		return &NodeScalingDeferredError{
-			Reason: fmt.Sprintf("waiting for regular pods to drain from reserved scaling node %s", node.Name),
+			Reason: fmt.Sprintf("waiting for regular pods to drain from reserved scaling nodes %s", strings.Join(reservedNodes, ", ")),
 		}
 	}
 
@@ -327,16 +371,42 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		}
 	}
 
-	node, err := FindHighestOrderUsedInventoryNode(inventory)
-	if err == nil {
-		if err := controller.ReserveScalingNode(node.Name); err != nil {
+	reservationBudget := int(targetReplicas - minNodeCount)
+	if reservationBudget > 0 {
+		if _, err := controller.reserveScaleInCandidates(inventory, reservationBudget, request); err != nil {
 			return err
 		}
-		controller.StartScaleInWaiter(node.Name, request)
 	}
 
 	logging.LogInfo("[%s] Node scale-in requested (reason: %s). Reduced MachineDeployment replicas from %d to %d using %d unused scaling nodes", request.Namespace, request.Reason, replicas, targetReplicas, unusedCount)
 	return nil
+}
+
+func (controller *NodeScalingController) reserveScaleInCandidates(inventory *inventoryv1.NodeScalingInventory, limit int, request ScaleInRequest) ([]string, error) {
+	if limit <= 0 {
+		return []string{}, nil
+	}
+
+	nodes, err := FindHighestOrderUsedInventoryNodes(inventory, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	reservedNodes := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		alreadyReserved, err := controller.NodeHasScalingReservation(node.Name)
+		if err != nil {
+			return nil, err
+		}
+		if !alreadyReserved {
+			if err := controller.ReserveScalingNode(node.Name); err != nil {
+				return nil, err
+			}
+		}
+		controller.StartScaleInWaiter(node.Name, request)
+		reservedNodes = append(reservedNodes, node.Name)
+	}
+	return reservedNodes, nil
 }
 
 func (controller *NodeScalingController) EnsureMachineDeploymentReplicaBaseline() error {
@@ -495,7 +565,10 @@ func (controller *NodeScalingController) StartScaleInWaiter(nodeName string, req
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	controller.scaleInWaiters[nodeName] = cancel
+	controller.scaleInWaiters[nodeName] = scaleInWaiter{
+		cancel:    cancel,
+		startedAt: time.Now().UTC(),
+	}
 	controller.scaleInWaitersMu.Unlock()
 
 	go func() {
@@ -530,12 +603,21 @@ func (controller *NodeScalingController) ProcessScaleInWaiter(nodeName string, r
 		return true, nil
 	}
 
-	hasRegularPods, err := controller.NodeHasRegularPods(nodeName)
+	hasBlockingPods, err := controller.NodeHasBlockingPods(nodeName)
 	if err != nil {
 		return false, err
 	}
-	if hasRegularPods {
-		return false, nil
+	if hasBlockingPods {
+		waitDuration, forceScaleIn := controller.ShouldForceScaleIn(nodeName)
+		if !forceScaleIn {
+			return false, nil
+		}
+		logging.LogWarning(
+			"[%s] Forcing node scale-in for %s after %s with blocking pods still present",
+			request.Namespace,
+			nodeName,
+			waitDuration.Round(time.Second),
+		)
 	}
 
 	if err := controller.inventoryStore.MarkNodeUnused(nodeName); err != nil {
@@ -547,7 +629,7 @@ func (controller *NodeScalingController) ProcessScaleInWaiter(nodeName string, r
 	return true, nil
 }
 
-func (controller *NodeScalingController) NodeHasRegularPods(nodeName string) (bool, error) {
+func (controller *NodeScalingController) NodeHasBlockingPods(nodeName string) (bool, error) {
 	pods, err := controller.client.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return false, err
@@ -560,6 +642,18 @@ func (controller *NodeScalingController) NodeHasRegularPods(nodeName string) (bo
 		if pod.Status.Phase == v12.PodSucceeded || pod.Status.Phase == v12.PodFailed {
 			continue
 		}
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		if isMirrorPod(&pod) {
+			continue
+		}
+		if controller.isScaleInExemptNamespace(pod.Namespace) {
+			continue
+		}
+		if controller.isScaleInExemptPod(&pod) {
+			continue
+		}
 		if isDaemonSetPod(&pod) {
 			continue
 		}
@@ -567,6 +661,27 @@ func (controller *NodeScalingController) NodeHasRegularPods(nodeName string) (bo
 	}
 
 	return false, nil
+}
+
+func (controller *NodeScalingController) isScaleInExemptNamespace(namespace string) bool {
+	_, exempt := controller.scaleInExemptNS[namespace]
+	return exempt
+}
+
+func (controller *NodeScalingController) isScaleInExemptPod(pod *v12.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	if controller.scaleInExemptKey == "" {
+		return false
+	}
+	if value, ok := pod.Labels[controller.scaleInExemptKey]; ok && value == controller.scaleInExemptValue {
+		return true
+	}
+	if value, ok := pod.Annotations[controller.scaleInExemptKey]; ok && value == controller.scaleInExemptValue {
+		return true
+	}
+	return false
 }
 
 func (controller *NodeScalingController) clearScaleInWaiter(nodeName string) {
@@ -587,7 +702,7 @@ func (controller *NodeScalingController) resetScaleInTrigger() {
 
 func (controller *NodeScalingController) StopScaleInWaiter(nodeName string) bool {
 	controller.scaleInWaitersMu.Lock()
-	cancel, exists := controller.scaleInWaiters[nodeName]
+	waiter, exists := controller.scaleInWaiters[nodeName]
 	if exists {
 		delete(controller.scaleInWaiters, nodeName)
 	}
@@ -596,8 +711,20 @@ func (controller *NodeScalingController) StopScaleInWaiter(nodeName string) bool
 		return false
 	}
 
-	cancel()
+	waiter.cancel()
 	return true
+}
+
+func (controller *NodeScalingController) ShouldForceScaleIn(nodeName string) (time.Duration, bool) {
+	controller.scaleInWaitersMu.Lock()
+	waiter, exists := controller.scaleInWaiters[nodeName]
+	controller.scaleInWaitersMu.Unlock()
+	if !exists {
+		return 0, false
+	}
+
+	waitDuration := time.Since(waiter.startedAt)
+	return waitDuration, waitDuration >= controller.scaleInForceDelay
 }
 
 func (controller *NodeScalingController) FindReusableScaleInWaiterNode(inventory *inventoryv1.NodeScalingInventory) (string, bool) {
@@ -615,9 +742,9 @@ func (controller *NodeScalingController) FindReusableScaleInWaiterNode(inventory
 	nodes := append([]inventoryv1.NodeScalingInventoryNode(nil), inventory.Spec.Nodes...)
 	sort.SliceStable(nodes, func(i, j int) bool {
 		if nodes[i].Order == nodes[j].Order {
-			return nodes[i].Name > nodes[j].Name
+			return nodes[i].Name < nodes[j].Name
 		}
-		return nodes[i].Order > nodes[j].Order
+		return nodes[i].Order < nodes[j].Order
 	})
 
 	for _, node := range nodes {
@@ -643,4 +770,12 @@ func isDaemonSetPod(pod *v12.Pod) bool {
 		}
 	}
 	return false
+}
+
+func isMirrorPod(pod *v12.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	_, exists := pod.Annotations[v12.MirrorPodAnnotationKey]
+	return exists
 }
