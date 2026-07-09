@@ -359,10 +359,6 @@ func (controller *NodeScalingController) SyncScalingNodeInventory() error {
 		return nil
 	}
 
-	if err := controller.syncRepoIfConfigured(); err != nil {
-		return err
-	}
-
 	replicas, err := controller.readMachineDeploymentReplicas()
 	if err != nil {
 		return err

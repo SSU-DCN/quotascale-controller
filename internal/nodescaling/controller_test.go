@@ -144,6 +144,39 @@ func TestNodeScalingControllerSyncScalingNodeInventoryUsesScalingNodes(t *testin
 	}
 }
 
+func TestNodeScalingControllerSyncScalingNodeInventoryDoesNotRequireRepoPull(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+
+	store := &captureNodeScalingInventoryStore{}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "node-a",
+				Labels: map[string]string{"role": "scaling"},
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoURL:      "http://invalid.example.local/repo.git",
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, client, store, time.Minute)
+
+	if err := controller.SyncScalingNodeInventory(); err != nil {
+		t.Fatalf("expected inventory sync to succeed without pulling the repo, got error: %v", err)
+	}
+	if store.calls != 1 {
+		t.Fatalf("expected inventory store to be called once, got %d", store.calls)
+	}
+	if store.replicas != 3 {
+		t.Fatalf("expected replicas to be read from the local manifest, got %d", store.replicas)
+	}
+}
+
 func TestNodeScalingControllerReconcileScaleOutActivatesInventoryNodeAndIncrementsReplicas(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
