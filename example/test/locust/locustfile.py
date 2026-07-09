@@ -9,10 +9,10 @@ from locust import HttpUser, LoadTestShape, constant_throughput, task
 
 
 TRACE_FILE = Path(os.getenv("WORLD_CUP_TRACE_CSV", "example/test/locust/worldcup_a.csv"))
-RPS_SCALE = float(os.getenv("RPS_SCALE", "30.0"))
-MAX_USERS = int(os.getenv("MAX_USERS", "800"))
+RPS_SCALE = float(os.getenv("RPS_SCALE", "80.0"))
+MAX_USERS = int(os.getenv("MAX_USERS", "3000"))
 SPAWN_FLOOR = float(os.getenv("SPAWN_FLOOR", "1.0"))
-SPAWN_FACTOR = float(os.getenv("SPAWN_FACTOR", "2.0"))
+SPAWN_FACTOR = float(os.getenv("SPAWN_FACTOR", "3.0"))
 
 
 @dataclass
@@ -45,7 +45,7 @@ TRACE_POINTS = load_trace(TRACE_FILE)
 
 class PodinfoUser(HttpUser):
     host = "http://placeholder.invalid"
-    wait_time = constant_throughput(10)
+    wait_time = constant_throughput(25)
 
     @task(5)
     def root(self):
@@ -62,7 +62,7 @@ class PodinfoUser(HttpUser):
 
 class HttpbinUser(HttpUser):
     host = "http://placeholder.invalid"
-    wait_time = constant_throughput(10)
+    wait_time = constant_throughput(25)
 
     @task(5)
     def get(self):
@@ -74,7 +74,7 @@ class HttpbinUser(HttpUser):
 
     @task(1)
     def bytes(self):
-        self.client.get("/bytes/65536", name="/bytes/[64KiB]")
+        self.client.get("/bytes/262144", name="/bytes/[256KiB]")
 
 
 class WorldCupReplayShape(LoadTestShape):
