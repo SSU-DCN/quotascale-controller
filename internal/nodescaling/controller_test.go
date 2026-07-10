@@ -540,7 +540,7 @@ func TestNodeScalingControllerReconcileScaleOutReusesLowestOrderActiveScaleInWai
 	}
 }
 
-func TestNodeScalingControllerReconcileScaleInShrinksReplicasAndReservesHighestUsedNode(t *testing.T) {
+func TestNodeScalingControllerReconcileScaleInShrinksReplicasUsingUnusedNodesOnly(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(5))
 
@@ -589,22 +589,11 @@ func TestNodeScalingControllerReconcileScaleInShrinksReplicasAndReservesHighestU
 	if err != nil {
 		t.Fatalf("expected node read to succeed, got error: %v", err)
 	}
-	if node.Labels["role"] != "scaling" {
-		t.Fatalf("expected role=scaling label on reserved node, got %#v", node.Labels)
+	if len(node.Labels) != 0 {
+		t.Fatalf("expected no additional reservation when unused nodes already exist, got labels %#v", node.Labels)
 	}
-	if _, exists := node.Labels["node-role.kubernetes.io/scaling"]; !exists {
-		t.Fatalf("expected node-role scaling label on reserved node, got %#v", node.Labels)
-	}
-	if len(node.Spec.Taints) != 1 || node.Spec.Taints[0].Key != "node-role.kubernetes.io/scaling" {
-		t.Fatalf("expected scaling taint on reserved node, got %#v", node.Spec.Taints)
-	}
-
-	nodeA, err := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("expected node read to succeed, got error: %v", err)
-	}
-	if nodeA.Labels["role"] != "scaling" {
-		t.Fatalf("expected additional used node to be reserved too, got %#v", nodeA.Labels)
+	if len(node.Spec.Taints) != 0 {
+		t.Fatalf("expected no additional reservation taint when unused nodes already exist, got taints %#v", node.Spec.Taints)
 	}
 }
 
@@ -1010,6 +999,16 @@ func TestNodeScalingControllerReconcileScaleInSkipsAtMinimumBaseline(t *testing.
 }
 
 func TestNodeScalingControllerEvaluateAutomaticScaleInQueuesRequestAfterDelay(t *testing.T) {
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 2,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "reserved-scaling", Order: 1, Used: true},
+				},
+			},
+		},
+	}
 	client := fake.NewSimpleClientset(
 		&v12.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
@@ -1057,7 +1056,7 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInQueuesRequestAfterDelay(t 
 		},
 	)
 
-	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	controller := NewNodeScalingController(nil, client, store, time.Minute)
 	controller.SetQuotaAutoscalerClient(scalerClient)
 	controller.SetScaleInTriggerDelay(time.Minute)
 	controller.runtime = &NodeScalingRuntime{
@@ -1089,6 +1088,16 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInQueuesRequestAfterDelay(t 
 }
 
 func TestNodeScalingControllerEvaluateAutomaticScaleInSkipsAtMinimumBaseline(t *testing.T) {
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 1,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "worker-1", Order: 1, Used: false},
+				},
+			},
+		},
+	}
 	client := fake.NewSimpleClientset(
 		&v12.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
@@ -1124,7 +1133,7 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInSkipsAtMinimumBaseline(t *
 		},
 	)
 
-	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	controller := NewNodeScalingController(nil, client, store, time.Minute)
 	controller.SetQuotaAutoscalerClient(scalerClient)
 	controller.SetScaleInTriggerDelay(time.Minute)
 	controller.runtime = &NodeScalingRuntime{
@@ -1141,6 +1150,91 @@ func TestNodeScalingControllerEvaluateAutomaticScaleInSkipsAtMinimumBaseline(t *
 	case request := <-controller.scaleInRequests:
 		t.Fatalf("expected no automatic scale-in request at minimum baseline, got %#v", request)
 	default:
+	}
+}
+
+func TestNodeScalingControllerEvaluateScaleInCapacityAllowsPartialScalingNodeRemoval(t *testing.T) {
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 3,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "scaling-a", Order: 1, Used: true},
+					{Name: "scaling-b", Order: 2, Used: true},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("4"),
+					v12.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "scaling-a"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("2"),
+					v12.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "scaling-b"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("2"),
+					v12.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+		&v12.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "quota-a",
+				Namespace: "default",
+			},
+			Spec: v12.ResourceQuotaSpec{
+				Hard: v12.ResourceList{
+					v12.ResourceLimitsCPU:    resource.MustParse("5"),
+					v12.ResourceLimitsMemory: resource.MustParse("10Gi"),
+				},
+			},
+		},
+	)
+	scalerClient := scalerfake.NewSimpleClientset(
+		&scalerv1.QuotaAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "scaler-a",
+				Namespace: "default",
+			},
+			Spec: scalerv1.QuotaAutoscalerSpec{
+				ResourceQuota: "quota-a",
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(nil, client, store, time.Minute)
+	controller.SetQuotaAutoscalerClient(scalerClient)
+	controller.runtime = &NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: t.TempDir(),
+	}
+	writeFile(t, filepath.Join(controller.runtime.RepoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+
+	evaluation, err := controller.EvaluateScaleInCapacity()
+	if err != nil {
+		t.Fatalf("expected scale-in capacity evaluation to succeed, got error: %v", err)
+	}
+	if !evaluation.Eligible {
+		t.Fatalf("expected one scaling node to be removable")
+	}
+	if len(evaluation.RemovableNodes) != 1 || evaluation.RemovableNodes[0] != "scaling-b" {
+		t.Fatalf("expected only highest-order scaling-b to be removable first, got %#v", evaluation.RemovableNodes)
 	}
 }
 

@@ -377,13 +377,6 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		}
 	}
 
-	reservationBudget := int(targetReplicas - minNodeCount)
-	if reservationBudget > 0 {
-		if _, err := controller.reserveScaleInCandidates(inventory, reservationBudget, request); err != nil {
-			return err
-		}
-	}
-
 	logging.LogInfo("[%s] Node scale-in requested (reason: %s). Reduced MachineDeployment replicas from %d to %d using %d unused scaling nodes", request.Namespace, request.Reason, replicas, targetReplicas, unusedCount)
 	return nil
 }
