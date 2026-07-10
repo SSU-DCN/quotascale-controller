@@ -10,7 +10,7 @@ package quota
 //  events, _ := client.CoreV1().Events("").Watch(context.TODO(), v1.ListOptions{})
 //
 //  // This is a blocking call, until either watcher channel terminates
-//  internal.WatchQuotas(client, startScalers, quotas.ResultChan(), scalers.ResultChan(), events.ResultChan(), cmEvents.ResultChan(), time.Minute)
+//  internal.WatchQuotas(client, startScalers, quotas.ResultChan(), scalers.ResultChan(), events.ResultChan(), time.Minute)
 //
 //	quotas.Stop()
 //  scalers.Stop()
@@ -67,7 +67,7 @@ func NewQuotaController(client kubernetes.Interface, quotaCheckInterval time.Dur
 // Run listens to namespaced ResourceQuotas and QuotaAutoscalers. When both are known for a namespace
 // the required behaviour is calculated. If scaling is required, following the behavior, the resize API is
 // invoked. This is a blocking call until either channel terminates.
-func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event, cmEvents <-chan watch.Event) {
+func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event) {
 	watcher := &QuotaWatcher{
 		Scalers:                map[string]v14.QuotaAutoscaler{},
 		Quotas:                 map[string]v12.ResourceQuota{},
@@ -140,22 +140,6 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 			}
 			// Non-quota-denied events are still aggregated by the ticker.
 
-		// cert-manager events will also be handled by the function RegisterNamespacedEvent
-		case cmEvent, ok := <-cmEvents:
-			if !ok {
-				return
-			}
-			ns, immediate := watcher.RegisterNamespacedEvent(cmEvent)
-			if ns != "" {
-				logging.LogDebug("[%s] CertManagerEvent", ns)
-				if immediate {
-					logging.LogInfo("[%s] Quota denied cert-manager event detected, triggering immediate quota evaluation", ns)
-					watcher.UpdateNs(ns, true)
-					delete(watcher.Events, ns)
-				}
-			}
-			// Non-quota-denied events are still aggregated by the ticker.
-
 		case <-ticker.C:
 			for ns := range watcher.Events {
 				logging.LogDebug("[%s] Ticker", ns)
@@ -169,8 +153,8 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 }
 
 // WatchQuotas is kept as a compatibility wrapper around QuotaController.
-func WatchQuotas(client kubernetes.Interface, startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event, cmEvents <-chan watch.Event, quotaCheckInterval time.Duration) {
-	NewQuotaController(client, quotaCheckInterval, nil).Run(startScalers, quotas, scalers, events, cmEvents)
+func WatchQuotas(client kubernetes.Interface, startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event, quotaCheckInterval time.Duration) {
+	NewQuotaController(client, quotaCheckInterval, nil).Run(startScalers, quotas, scalers, events)
 }
 
 func (watcher *QuotaWatcher) CheckQuotasPeriodically() {
@@ -310,7 +294,7 @@ func IsImmediateQuotaDeniedEvent(ev *v12.Event) bool {
 	}
 
 	switch ev.Reason {
-	case "FailedCreate", "PresentError":
+	case "FailedCreate":
 	default:
 		return false
 	}

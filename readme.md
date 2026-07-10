@@ -156,7 +156,7 @@ The current implementation manages CPU and memory only.
 
 Important details:
 
-- immediate event-driven scale-up is triggered only for quota-related `FailedCreate` and `PresentError` events
+- immediate event-driven scale-up is triggered only for quota-related `FailedCreate` events
 - those events are filtered by process start time, so a freshly started controller does not replay old quota-denied events
 - cluster fit checks use allocatable worker-node capacity minus currently requested pod resources
 - control-plane nodes, unschedulable nodes, and nodes with the scaling `NoSchedule` taint are excluded from quota scale-up capacity

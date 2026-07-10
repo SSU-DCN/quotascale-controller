@@ -112,19 +112,6 @@ func getPodTemplateSpecFromEv(client kubernetes.Interface, ev v12.Event) (v12.Po
 		}
 		pod = *target.Spec.Template
 		replicas = *target.Spec.Replicas - target.Status.Replicas
-	case "Challenge":
-		// The challenge manifest doesn't contain the pod specs,
-		// so we create a generic spec with the defaults from cert-manager pod.
-		pod = v12.PodTemplateSpec{
-			Spec: v12.PodSpec{
-				Containers: []v12.Container{
-					{Name: "dummy-container",
-						Resources: v12.ResourceRequirements{
-							Requests: v12.ResourceList{v12.ResourceCPU: resource.MustParse("10m"), v12.ResourceMemory: resource.MustParse("64Mi")},
-							Limits:   v12.ResourceList{v12.ResourceCPU: resource.MustParse("100m"), v12.ResourceMemory: resource.MustParse("64Mi")},
-						}}}}}
-		// Just one ephemeral pod needed for a challenge
-		replicas = 1
 	default:
 		return v12.PodTemplateSpec{}, 0, errors.New("unsupported event")
 	}

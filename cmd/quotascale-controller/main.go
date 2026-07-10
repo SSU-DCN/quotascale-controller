@@ -121,19 +121,12 @@ func main() {
 			panic(err)
 		}
 
-		// cert-manager solver pod failures surface as PresentError events, so keep a dedicated watch for quota-denied cases there too.
-		cmEventWatch, err := client.CoreV1().Events("").Watch(context.TODO(), v1.ListOptions{TimeoutSeconds: &watchTimeoutSec, FieldSelector: "reason=PresentError"})
-		if err != nil {
-			panic(err)
-		}
-
 		// Blocking call until stream watch timeout
-		quotaController.Run(startScalerState.Items, quotaWatch.ResultChan(), scalerWatch.ResultChan(), eventWatch.ResultChan(), cmEventWatch.ResultChan())
+		quotaController.Run(startScalerState.Items, quotaWatch.ResultChan(), scalerWatch.ResultChan(), eventWatch.ResultChan())
 
 		scalerWatch.Stop()
 		quotaWatch.Stop()
 		eventWatch.Stop()
-		cmEventWatch.Stop()
 	}
 }
 
