@@ -809,6 +809,79 @@ func TestNodeScalingControllerProcessScaleInWaiterForcesScaleInAfterTimeout(t *t
 	}
 }
 
+func TestNodeScalingControllerProcessScaleInWaiterWaitsIndefinitelyWhenForceDisabled(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 2,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: true},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "middleware-pod",
+				Namespace: "app",
+			},
+			Spec:   v12.PodSpec{NodeName: "node-a"},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+	controller.SetScaleInForceEnabled(false)
+	controller.SetScaleInForceDelay(time.Minute)
+	controller.StartScaleInWaiter("node-a", ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	})
+	controller.scaleInWaitersMu.Lock()
+	waiter := controller.scaleInWaiters["node-a"]
+	waiter.startedAt = time.Now().Add(-24 * time.Hour)
+	controller.scaleInWaiters["node-a"] = waiter
+	controller.scaleInWaitersMu.Unlock()
+
+	done, err := controller.ProcessScaleInWaiter("node-a", ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	})
+	if err != nil {
+		t.Fatalf("expected waiter processing to keep waiting cleanly, got error: %v", err)
+	}
+	if done {
+		t.Fatalf("expected waiter processing to keep waiting when force is disabled")
+	}
+	if !store.inventory.Spec.Nodes[0].Used {
+		t.Fatalf("expected node to remain used while blocking pod is present and force is disabled")
+	}
+	select {
+	case request := <-controller.scaleInRequests:
+		t.Fatalf("expected no requeued scale-in request when force is disabled, got %#v", request)
+	default:
+	}
+}
+
 func TestNodeScalingControllerReconcileScaleInReturnsDeferredErrorWhenWaitingForDrain(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))

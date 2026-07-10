@@ -194,7 +194,9 @@ Important runtime behavior:
 3. Additional used scaling nodes can be reserved in parallel for future scale-in.
 4. Reserved nodes are marked with the scaling label and `NoSchedule` taint, then watched asynchronously until they no longer have blocking pods.
 5. When a reserved node drains, it is marked unused in `NodeScalingInventory` and another scale-in reconcile is queued.
-6. If a new scale-out request arrives while scale-in waiters are active, only the reused waiter is cancelled; the other waiters continue.
+6. If `--enable-node-scale-in-force=true`, a waiter can also be force-completed after `--node-scale-in-force-delay` even when blocking pods still remain.
+7. If `--enable-node-scale-in-force=false`, the waiter remains active indefinitely until the blocking pods are gone.
+8. If a new scale-out request arrives while scale-in waiters are active, only the reused lower-order waiter is cancelled; the other waiters continue.
 
 ### What counts as a blocking pod during scale-in
 
@@ -214,7 +216,8 @@ Blocking by default:
 - regular workload pods that are still running on the reserved node
 - middleware or platform pods that are not exempted by namespace or marker
 
-If blocking pods remain for longer than `--node-scale-in-force-delay`, the controller force-completes that node's scale-in path without using the eviction API.
+If `--enable-node-scale-in-force=true` and blocking pods remain for longer than `--node-scale-in-force-delay`, the controller force-completes that node's scale-in path without using the eviction API.
+If `--enable-node-scale-in-force=false`, the controller waits indefinitely and relies on future pod drainage or waiter reuse by a later scale-out request.
 
 ## Running locally
 
@@ -253,6 +256,7 @@ In that case, install the CRD first.
 | `--quota-check-interval` | Periodic quota utilization check interval | `1m` |
 | `--quota-update-interval` | Minimum delay between resize operations for the same namespace | `1m` |
 | `--node-scale-in-delay` | How long scale-in eligibility must remain true before automatic scale-in | `5m` |
+| `--enable-node-scale-in-force` | Enable forced completion of scale-in waiters after the configured force delay | `true` |
 | `--node-scale-in-force-delay` | How long a reserved scale-in node may keep blocking pods before forced scale-in path continues | `5m` |
 | `--node-scale-in-exempt-namespaces` | Comma-separated namespaces whose pods do not block scale-in | `kube-system` |
 | `--node-scale-in-exempt-pod-key` | Label or annotation key that marks a pod as scale-in exempt | `quotascale.dcn.ssu.ac.kr/scale-in-exempt` |

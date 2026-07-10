@@ -61,6 +61,7 @@ type NodeScalingController struct {
 	inventoryStore        NodeScalingInventoryStore
 	inventorySyncInterval time.Duration
 	scaleInTriggerDelay   time.Duration
+	scaleInForceEnabled   bool
 	scaleInForceDelay     time.Duration
 	maxNodeCount          int32
 	scaleInExemptKey      string
@@ -88,6 +89,7 @@ func NewNodeScalingController(runtime *NodeScalingRuntime, client kubernetes.Int
 		inventoryStore:        inventoryStore,
 		inventorySyncInterval: inventorySyncInterval,
 		scaleInTriggerDelay:   defaultScaleInTriggerDelay,
+		scaleInForceEnabled:   true,
 		scaleInForceDelay:     defaultScaleInForceDelay,
 		maxNodeCount:          defaultMaxNodeCount,
 		scaleInExemptKey:      defaultScaleInExemptPodKey,
@@ -124,6 +126,10 @@ func (controller *NodeScalingController) SetScaleInForceDelay(delay time.Duratio
 		delay = defaultScaleInForceDelay
 	}
 	controller.scaleInForceDelay = delay
+}
+
+func (controller *NodeScalingController) SetScaleInForceEnabled(enabled bool) {
+	controller.scaleInForceEnabled = enabled
 }
 
 func (controller *NodeScalingController) SetScaleInExemptNamespaces(namespaces []string) {
@@ -724,6 +730,9 @@ func (controller *NodeScalingController) ShouldForceScaleIn(nodeName string) (ti
 	}
 
 	waitDuration := time.Since(waiter.startedAt)
+	if !controller.scaleInForceEnabled {
+		return waitDuration, false
+	}
 	return waitDuration, waitDuration >= controller.scaleInForceDelay
 }
 
