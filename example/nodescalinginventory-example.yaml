@@ -1,0 +1,24 @@
+apiVersion: dcn.ssu.ac.kr/v1
+kind: NodeScalingInventory
+metadata:
+  name: default
+spec:
+  machineDeploymentReplicas: 4
+  nodes:
+    - name: ip-192-168-10-101.ec2.internal
+      order: 1
+      used: true
+    - name: ip-192-168-10-102.ec2.internal
+      order: 2
+      used: true
+    - name: ip-192-168-10-103.ec2.internal
+      order: 3
+      used: true
+    - name: ip-192-168-10-104.ec2.internal
+      order: 4
+      used: false
+status:
+  desired: 4
+  replicas: 4
+  used: 3
+  unused: 1
