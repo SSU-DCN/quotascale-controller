@@ -16,15 +16,23 @@ func EnsureScaleUpFitsCluster(client kubernetes.Interface, current, desired reso
 		return nil
 	}
 
+	required := resources.Resources{}
+	if desired.Cpu > current.Cpu {
+		required.Cpu = desired.Cpu - current.Cpu
+	}
+	if desired.Memory > current.Memory {
+		required.Memory = desired.Memory - current.Memory
+	}
+
 	available, err := WorkerNodeAvailableResources(client)
 	if err != nil {
 		return err
 	}
-	if desired.Cpu > available.Cpu || desired.Memory > available.Memory {
+	if required.Cpu > available.Cpu || required.Memory > available.Memory {
 		return fmt.Errorf(
-			"scale up desired quota CPU %dm and memory %dM exceeds worker node available CPU %dm and memory %dM",
-			desired.Cpu,
-			desired.Memory,
+			"scale up requires additional CPU %dm and memory %dM, but worker node available CPU is %dm and memory is %dM",
+			required.Cpu,
+			required.Memory,
 			available.Cpu,
 			available.Memory,
 		)

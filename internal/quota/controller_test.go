@@ -161,7 +161,7 @@ func TestUpdateQuotaIfRequiredRechecksCapacityAfterScaleOut(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
 			Status: corev1.NodeStatus{
 				Allocatable: corev1.ResourceList{
-					corev1.ResourceCPU:    resource.MustParse("1500m"),
+					corev1.ResourceCPU:    resource.MustParse("500m"),
 					corev1.ResourceMemory: resource.MustParse("4Gi"),
 				},
 			},

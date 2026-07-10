@@ -79,10 +79,26 @@ func TestEnsureScaleUpFitsClusterRejectsUnavailableCapacity(t *testing.T) {
 	err := EnsureScaleUpFitsCluster(
 		client,
 		resources.Resources{Cpu: 2500, Memory: 2048},
-		resources.Resources{Cpu: 3500, Memory: 3072},
+		resources.Resources{Cpu: 6000, Memory: 5120},
 	)
 	if err == nil {
-		t.Fatalf("expected scale up to be rejected when desired quota exceeds worker availability")
+		t.Fatalf("expected scale up to be rejected when required incremental quota exceeds worker availability")
+	}
+}
+
+func TestEnsureScaleUpFitsClusterAllowsDesiredTotalWhenIncrementFits(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		node("worker-1", "4", "4Gi", nil),
+		pod("running", "worker-1", corev1.PodRunning, "500m", "512Mi"),
+	)
+
+	err := EnsureScaleUpFitsCluster(
+		client,
+		resources.Resources{Cpu: 4000, Memory: 2048},
+		resources.Resources{Cpu: 5000, Memory: 3072},
+	)
+	if err != nil {
+		t.Fatalf("expected scale up to succeed when only the incremental quota increase must fit, got error: %v", err)
 	}
 }
 
