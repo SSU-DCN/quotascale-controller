@@ -233,9 +233,7 @@ Apply the CRDs and example manifests:
 export KUBECONFIG=$HOME/.kube/config
 
 kubectl apply -f deploy/helm-quotascale-controller/templates/crd.yaml
-kubectl apply -f example/compute-resources.yaml
 kubectl apply -f example/example-scaler.yaml
-kubectl apply -f example/test-workload.yaml
 ```
 
 Run the controller:
@@ -302,9 +300,7 @@ If `GITEA_REPO_URL` uses HTTP basic authentication, the controller uses `GITEA_U
 
 ## Example manifests
 
-- `example/compute-resources.yaml`: example `ResourceQuota`
 - `example/example-scaler.yaml`: example `QuotaAutoscaler`
-- `example/test-workload.yaml`: simple test deployment for quota pressure
 - `example/test/`: full demo scenario with namespaces, workloads, HPA, and Locust-based replay traffic
 
 ## RBAC summary

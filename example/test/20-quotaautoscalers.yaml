@@ -25,7 +25,6 @@ spec:
   max.cpu: "15"
   min.memory: "4Gi"
   max.memory: "15Gi"
-  resourceQuota: compute-resources
 ---
 apiVersion: dcn.ssu.ac.kr/v1
 kind: QuotaAutoscaler
@@ -54,4 +53,3 @@ spec:
   max.cpu: "15"
   min.memory: "4Gi"
   max.memory: "15Gi"
-  resourceQuota: compute-resources

@@ -1,28 +1,27 @@
 apiVersion: dcn.ssu.ac.kr/v1
 kind: QuotaAutoscaler
 metadata:
-  name: default-quotascale-controller
-  namespace: default
+  name: quota-test-a-autoscaler
+  namespace: quota-test-a
 spec:
   behavior:
     scaleDown:
       policies:
         - method: cpu
           value: 30
-          targetUtilization: 50
+          targetUtilization: 70
         - method: memory
           value: 30
-          targetUtilization: 50
+          targetUtilization: 70
     scaleUp:
       policies:
         - method: cpu
           value: 70
-          targetUtilization: 50
+          targetUtilization: 70
         - method: memory
           value: 70
-          targetUtilization: 50
-  min.cpu: "4000m"
-  max.cpu: "6"
-  min.memory: "4G"
-  max.memory: "6G"
-  resourceQuota: compute-resources
+          targetUtilization: 70
+  min.cpu: "4"
+  max.cpu: "15"
+  min.memory: "4Gi"
+  max.memory: "15Gi"
