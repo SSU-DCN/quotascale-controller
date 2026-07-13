@@ -9,18 +9,18 @@ spec:
       policies:
         - method: cpu
           value: 30
-          targetUtilization: 70
+          targetUtilization: 50
         - method: memory
           value: 30
-          targetUtilization: 70
+          targetUtilization: 50
     scaleUp:
       policies:
         - method: cpu
           value: 70
-          targetUtilization: 70
+          targetUtilization: 50
         - method: memory
           value: 70
-          targetUtilization: 70
+          targetUtilization: 50
   min.cpu: "4"
   max.cpu: "15"
   min.memory: "4Gi"
