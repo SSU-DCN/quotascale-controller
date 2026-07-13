@@ -422,6 +422,9 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		}
 		reservableUsedCount = len(evaluation.RemovableNodes)
 	}
+	if batchLimit := controller.scaleOutBatchSize(); batchLimit > 0 && reservableUsedCount > batchLimit {
+		reservableUsedCount = batchLimit
+	}
 
 	reservedNodes, err := controller.reserveScaleInCandidates(inventory, reservableUsedCount, request)
 	if err != nil {
