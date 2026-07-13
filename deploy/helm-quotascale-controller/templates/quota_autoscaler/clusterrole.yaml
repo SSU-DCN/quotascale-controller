@@ -7,7 +7,7 @@ metadata:
 rules:
   - apiGroups: ["dcn.ssu.ac.kr"]
     resources: ["quotaautoscalers"]
-    verbs: ["watch", "list"]
+    verbs: ["get", "watch", "list", "update", "patch"]
   - apiGroups: ["dcn.ssu.ac.kr"]
     resources: ["nodescalinginventories"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]

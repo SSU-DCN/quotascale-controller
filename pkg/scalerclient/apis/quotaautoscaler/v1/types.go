@@ -13,7 +13,7 @@ type QuotaAutoscaler struct {
 }
 
 type QuotaAutoscalerSpec struct {
-	ResourceQuota string `json:"resourceQuota"`
+	ResourceQuota string `json:"resourceQuota,omitempty"`
 
 	MinCpu string `json:"min.cpu,omitempty"`
 	MaxCpu string `json:"max.cpu,omitempty"`

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/SSU-DCN/quotascale-controller/internal/scalerresolver"
 	"github.com/SSU-DCN/quotascale-controller/pkg/resources"
 	v12 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -137,7 +138,8 @@ func (controller *NodeScalingController) ManagedQuotaLimitTotals() (resources.Re
 
 	total := resources.Resources{}
 	for _, scaler := range scalers.Items {
-		quota, err := controller.client.CoreV1().ResourceQuotas(scaler.Namespace).Get(context.TODO(), scaler.Spec.ResourceQuota, metav1.GetOptions{})
+		scalerCopy := scaler
+		quota, err := scalerresolver.ResolveResourceQuota(context.TODO(), controller.client, controller.quotaAutoscalerClient, &scalerCopy)
 		if err != nil {
 			return resources.Resources{}, err
 		}

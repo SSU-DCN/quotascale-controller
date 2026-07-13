@@ -69,7 +69,7 @@ Purpose:
 
 Key spec fields:
 
-- `resourceQuota`: target `ResourceQuota` name in the same namespace
+- `resourceQuota`: optional target `ResourceQuota` name in the same namespace
 - `min.cpu`
 - `max.cpu`
 - `min.memory`
@@ -82,6 +82,9 @@ Each policy supports:
 - `method`: `cpu` or `memory`
 - `value`: threshold percentage
 - `targetUtilization`: desired utilization percentage after scaling
+
+If `spec.resourceQuota` is omitted, the controller automatically finds the namespace `ResourceQuota` only when exactly one exists and writes that name back into the `QuotaAutoscaler` spec.
+If multiple `ResourceQuota` objects exist in the namespace, the field must still be set explicitly.
 
 Example:
 

@@ -26,18 +26,20 @@ import (
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
 	"github.com/SSU-DCN/quotascale-controller/internal/resize"
+	"github.com/SSU-DCN/quotascale-controller/internal/scalerresolver"
 	"github.com/SSU-DCN/quotascale-controller/pkg/logging"
 	"github.com/SSU-DCN/quotascale-controller/pkg/resources"
 	v14 "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/apis/quotaautoscaler/v1"
+	scalerclient "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/client/clientset/versioned"
 	v12 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	v13 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 )
 
 type QuotaController struct {
 	client                 kubernetes.Interface
+	quotaAutoscalerClient  scalerclient.Interface
 	quotaCheckInterval     time.Duration
 	scaleOutRequestHandler nodescaling.ScaleOutRequestHandler
 }
@@ -50,15 +52,17 @@ type QuotaWatcher struct {
 	Started time.Time
 
 	Client                 kubernetes.Interface
+	QuotaAutoscalerClient  scalerclient.Interface
 	ScaleOutRequestHandler nodescaling.ScaleOutRequestHandler
 }
 
-func NewQuotaController(client kubernetes.Interface, quotaCheckInterval time.Duration, scaleOutRequestHandler nodescaling.ScaleOutRequestHandler) *QuotaController {
+func NewQuotaController(client kubernetes.Interface, quotaAutoscalerClient scalerclient.Interface, quotaCheckInterval time.Duration, scaleOutRequestHandler nodescaling.ScaleOutRequestHandler) *QuotaController {
 	if quotaCheckInterval <= 0 {
 		quotaCheckInterval = time.Minute
 	}
 	return &QuotaController{
 		client:                 client,
+		quotaAutoscalerClient:  quotaAutoscalerClient,
 		quotaCheckInterval:     quotaCheckInterval,
 		scaleOutRequestHandler: scaleOutRequestHandler,
 	}
@@ -74,21 +78,15 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 		Events:                 map[string][]v12.Event{},
 		Started:                time.Now().UTC(),
 		Client:                 controller.client,
+		QuotaAutoscalerClient:  controller.quotaAutoscalerClient,
 		ScaleOutRequestHandler: controller.scaleOutRequestHandler,
 	}
 
-	// Init scaler state so that we know which ResourceQuotas to couple. The Scaler has a field with the
-	// resource name of the ResourceQuota object, so we cannot store ResourceQuota objects until we know
-	// the scaler spec. After registering the Scalers we will get the ResourceQuotas in the event stream.
 	for _, nsScaler := range startScalers {
-		watcher.Scalers[nsScaler.Namespace] = nsScaler
-	}
-	startQuotas, _ := controller.client.CoreV1().ResourceQuotas("").List(context.TODO(), v13.ListOptions{})
-	for _, startQuota := range startQuotas.Items {
-		scaler, ok := watcher.Scalers[startQuota.Namespace]
-		if ok && scaler.Spec.ResourceQuota == startQuota.Name {
-			watcher.Quotas[startQuota.Namespace] = startQuota
+		if err := watcher.ResolveScalerResourceQuota(&nsScaler); err != nil {
+			logging.LogWarning("[%s/%s] Failed to resolve ResourceQuota during startup: %v", nsScaler.Namespace, nsScaler.Name, err)
 		}
+		watcher.Scalers[nsScaler.Namespace] = nsScaler
 	}
 
 	// Ticker aggregates Namespace and ResourceQuota events
@@ -154,14 +152,16 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 
 // WatchQuotas is kept as a compatibility wrapper around QuotaController.
 func WatchQuotas(client kubernetes.Interface, startScalers []v14.QuotaAutoscaler, quotas, scalers, events <-chan watch.Event, quotaCheckInterval time.Duration) {
-	NewQuotaController(client, quotaCheckInterval, nil).Run(startScalers, quotas, scalers, events)
+	NewQuotaController(client, nil, quotaCheckInterval, nil).Run(startScalers, quotas, scalers, events)
 }
 
 func (watcher *QuotaWatcher) CheckQuotasPeriodically() {
 	for namespace, scaler := range watcher.Scalers {
-		if err := watcher.RegisterMissingResourceQuota(namespace, scaler.Spec.ResourceQuota); err != nil {
+		scalerCopy := scaler
+		if err := watcher.ResolveScalerResourceQuota(&scalerCopy); err != nil {
 			continue
 		}
+		watcher.Scalers[namespace] = scalerCopy
 
 		logging.LogDebug("[%s] Periodic quota utilization check", namespace)
 		watcher.UpdateNs(namespace, false)
@@ -197,9 +197,10 @@ func (watcher *QuotaWatcher) RegisterScalerEvent(event watch.Event) string {
 	}
 
 	watcher.Scalers[scaler.Namespace] = *scaler
-	if _, ok := watcher.Quotas[scaler.Namespace]; !ok {
-		_ = watcher.RegisterMissingResourceQuota(scaler.Namespace, scaler.Spec.ResourceQuota) // A bit slow, but needed
+	if err := watcher.ResolveScalerResourceQuota(scaler); err != nil {
+		logging.LogWarning("[%s/%s] Failed to resolve ResourceQuota: %v", scaler.Namespace, scaler.Name, err)
 	}
+	watcher.Scalers[scaler.Namespace] = *scaler
 	return scaler.Namespace
 }
 
@@ -209,6 +210,13 @@ func (watcher *QuotaWatcher) RegisterQuotaEvent(event watch.Event) string {
 
 	// Get QuotaAutoscaler to see event Quota is a target
 	scaler, ok := watcher.Scalers[quota.Namespace]
+	if ok && scaler.Spec.ResourceQuota == "" {
+		scalerCopy := scaler
+		if err := watcher.ResolveScalerResourceQuota(&scalerCopy); err == nil {
+			watcher.Scalers[quota.Namespace] = scalerCopy
+			scaler = scalerCopy
+		}
+	}
 	if ok && scaler.Spec.ResourceQuota == quota.Name {
 
 		if event.Type == watch.Deleted {
@@ -223,18 +231,13 @@ func (watcher *QuotaWatcher) RegisterQuotaEvent(event watch.Event) string {
 	return ""
 }
 
-// RegisterMissingResourceQuota fetches the given quota and stores it in the watcher. Does not consume Lock, so
-// it must be called when holding the (Mutex) Lock.
-func (watcher *QuotaWatcher) RegisterMissingResourceQuota(namespace, quotaName string) error {
-	logging.LogInfo("[%s] Registering missing ResourceQuota: %s", namespace, quotaName)
-	quota, err := watcher.Client.CoreV1().ResourceQuotas(namespace).Get(context.TODO(), quotaName, v13.GetOptions{})
-	if err == nil {
-		watcher.Quotas[namespace] = *quota // Register
-	} else {
-		logging.LogError("[%s] Failed to register ResourceQuota %s: %v", namespace, quotaName, err)
+func (watcher *QuotaWatcher) ResolveScalerResourceQuota(scaler *v14.QuotaAutoscaler) error {
+	quota, err := scalerresolver.ResolveResourceQuota(context.TODO(), watcher.Client, watcher.QuotaAutoscalerClient, scaler)
+	if err != nil {
+		return err
 	}
-
-	return err
+	watcher.Quotas[scaler.Namespace] = *quota
+	return nil
 }
 
 // RegisterNamespacedEvent stores namespaced Events in watcher. Should be cleaned up by aggregate loop

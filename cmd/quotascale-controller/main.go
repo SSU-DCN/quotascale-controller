@@ -90,7 +90,7 @@ func main() {
 		scaleOutRequestHandler = nodeScalingController
 		go nodeScalingController.Run()
 	}
-	quotaController := quota.NewQuotaController(client, *quotaCheckInterval, scaleOutRequestHandler)
+	quotaController := quota.NewQuotaController(client, ichpClient, *quotaCheckInterval, scaleOutRequestHandler)
 
 	go func() {
 		// Profiling

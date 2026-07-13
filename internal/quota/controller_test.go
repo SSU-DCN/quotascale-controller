@@ -1,12 +1,14 @@
 package quota
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
 	scalerv1 "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/apis/quotaautoscaler/v1"
+	scalerfake "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/client/clientset/versioned/fake"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -245,5 +247,60 @@ func TestUpdateQuotaIfRequiredRechecksCapacityAfterScaleOut(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "node scale-out completed but desired quota is still unavailable") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRegisterScalerEventAutoResolvesSingleResourceQuota(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset(
+		&corev1.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "compute-resources",
+				Namespace: "default",
+			},
+		},
+	)
+	scalerClient := scalerfake.NewSimpleClientset(
+		&scalerv1.QuotaAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "qa",
+				Namespace: "default",
+			},
+		},
+	)
+	watcher := &QuotaWatcher{
+		Scalers:               map[string]scalerv1.QuotaAutoscaler{},
+		Quotas:                map[string]corev1.ResourceQuota{},
+		Events:                map[string][]corev1.Event{},
+		Client:                kubeClient,
+		QuotaAutoscalerClient: scalerClient,
+	}
+
+	namespace := watcher.RegisterScalerEvent(watch.Event{
+		Type: watch.Added,
+		Object: &scalerv1.QuotaAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "qa",
+				Namespace: "default",
+			},
+		},
+	})
+	if namespace != "default" {
+		t.Fatalf("expected namespace default, got %q", namespace)
+	}
+
+	storedScaler := watcher.Scalers["default"]
+	if storedScaler.Spec.ResourceQuota != "compute-resources" {
+		t.Fatalf("expected watcher scaler spec.resourceQuota to be auto-populated, got %q", storedScaler.Spec.ResourceQuota)
+	}
+	if watcher.Quotas["default"].Name != "compute-resources" {
+		t.Fatalf("expected watcher quota cache to be populated, got %#v", watcher.Quotas["default"])
+	}
+
+	persistedScaler, err := scalerClient.IchpV1().QuotaAutoscalers("default").Get(context.TODO(), "qa", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected persisted QuotaAutoscaler to be readable, got error: %v", err)
+	}
+	if persistedScaler.Spec.ResourceQuota != "compute-resources" {
+		t.Fatalf("expected persisted spec.resourceQuota to be auto-populated, got %q", persistedScaler.Spec.ResourceQuota)
 	}
 }

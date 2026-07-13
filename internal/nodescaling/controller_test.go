@@ -1376,6 +1376,47 @@ func TestNodeScalingControllerEvaluateScaleInCapacityAllowsPartialScalingNodeRem
 	}
 }
 
+func TestNodeScalingControllerManagedQuotaLimitTotalsAutoResolvesSingleResourceQuota(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&v12.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "quota-a",
+				Namespace: "default",
+			},
+			Spec: v12.ResourceQuotaSpec{
+				Hard: v12.ResourceList{
+					v12.ResourceLimitsCPU:    resource.MustParse("2"),
+					v12.ResourceLimitsMemory: resource.MustParse("2Gi"),
+				},
+			},
+		},
+	)
+	scalerClient := scalerfake.NewSimpleClientset(
+		&scalerv1.QuotaAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "scaler-a",
+				Namespace: "default",
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	controller.SetQuotaAutoscalerClient(scalerClient)
+
+	total, err := controller.ManagedQuotaLimitTotals()
+	if err != nil {
+		t.Fatalf("expected managed quota totals to resolve a single ResourceQuota automatically, got error: %v", err)
+	}
+	if total.Cpu != 2000 {
+		t.Fatalf("expected total cpu 2000m, got %d", total.Cpu)
+	}
+	expectedMemoryQuantity := resource.MustParse("2Gi")
+	expectedMemory := expectedMemoryQuantity.ScaledValue(resource.Mega)
+	if total.Memory != expectedMemory {
+		t.Fatalf("expected total memory %dM, got %dM", expectedMemory, total.Memory)
+	}
+}
+
 func TestNodeScalingControllerNonScalingWorkerNodeCapacityIncludesLabelOnlyScalingNodes(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		&v12.Node{
