@@ -22,6 +22,7 @@ import (
 	"fmt"
 	_ "net/http/pprof"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
@@ -62,6 +63,8 @@ type QuotaWatcher struct {
 	Client                 kubernetes.Interface
 	QuotaAutoscalerClient  scalerclient.Interface
 	ScaleOutRequestHandler nodescaling.ScaleOutRequestHandler
+	pendingScaleOut        map[string]struct{}
+	pendingScaleOutMu      sync.Mutex
 }
 
 func NewQuotaController(client kubernetes.Interface, quotaAutoscalerClient scalerclient.Interface, quotaCheckInterval time.Duration, scaleOutRequestHandler nodescaling.ScaleOutRequestHandler) *QuotaController {
@@ -88,6 +91,7 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 		Client:                 controller.client,
 		QuotaAutoscalerClient:  controller.quotaAutoscalerClient,
 		ScaleOutRequestHandler: controller.scaleOutRequestHandler,
+		pendingScaleOut:        map[string]struct{}{},
 	}
 
 	for _, nsScaler := range startScalers {
@@ -338,6 +342,14 @@ func ResourceQuotaUsedCpuLimit(quota *v12.ResourceQuota) *resource.Quantity {
 }
 
 func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scaler v14.QuotaAutoscaler, events []v12.Event) error {
+	defer func() {
+		// When this reconciliation no longer needs an external scale-out request,
+		// future quota pressure can enqueue a fresh one.
+		if !watcher.namespaceNeedsScaleOut(quota, scaler, events) {
+			watcher.clearPendingScaleOut(quota.Namespace)
+		}
+	}()
+
 	validatedScaler := ValidateQuotaScaler(&scaler)
 	desired := &resources.Resources{
 		Cpu:    quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
@@ -389,6 +401,12 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	if desired.DiffersFrom(&quota) {
 		if err := EnsureScaleUpFitsCluster(watcher.Client, current, *desired); err != nil {
 			if watcher.ScaleOutRequestHandler != nil && !desired.IsScaleDown(&quota) {
+				if !watcher.beginPendingScaleOut(quota.Namespace) {
+					return &QuotaDeferredError{
+						Reason: fmt.Sprintf("node scale-out already pending; waiting for worker capacity before resizing quota: %s", err.Error()),
+					}
+				}
+
 				handleErr := watcher.ScaleOutRequestHandler.HandleScaleOutRequest(nodescaling.ScaleOutRequest{
 					Namespace: quota.Namespace,
 					Current:   current,
@@ -396,6 +414,7 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 					Reason:    err.Error(),
 				})
 				if handleErr != nil {
+					watcher.clearPendingScaleOut(quota.Namespace)
 					return handleErr
 				}
 
@@ -413,4 +432,72 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	}
 
 	return nil
+}
+
+func (watcher *QuotaWatcher) beginPendingScaleOut(namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+
+	watcher.pendingScaleOutMu.Lock()
+	defer watcher.pendingScaleOutMu.Unlock()
+	if watcher.pendingScaleOut == nil {
+		watcher.pendingScaleOut = map[string]struct{}{}
+	}
+	if _, exists := watcher.pendingScaleOut[namespace]; exists {
+		return false
+	}
+	watcher.pendingScaleOut[namespace] = struct{}{}
+	return true
+}
+
+func (watcher *QuotaWatcher) clearPendingScaleOut(namespace string) {
+	if namespace == "" {
+		return
+	}
+
+	watcher.pendingScaleOutMu.Lock()
+	delete(watcher.pendingScaleOut, namespace)
+	watcher.pendingScaleOutMu.Unlock()
+}
+
+func (watcher *QuotaWatcher) namespaceNeedsScaleOut(quota v12.ResourceQuota, scaler v14.QuotaAutoscaler, events []v12.Event) bool {
+	validatedScaler := ValidateQuotaScaler(&scaler)
+	desired := &resources.Resources{
+		Cpu:    quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
+		Memory: quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
+	}
+
+	for _, policy := range scaler.Spec.Behavior.ScaleDown.Policies {
+		desired.Replace(validatedScaler.ActivateScalerPolicy(policy, &quota, false))
+	}
+	for _, policy := range scaler.Spec.Behavior.ScaleUp.Policies {
+		desired.Replace(validatedScaler.ActivateScalerPolicy(policy, &quota, true))
+	}
+
+	if events != nil {
+		if sum, _ := GetResourcesFromPodEvents(watcher.Client, events); sum != nil && !sum.IsEmpty() {
+			desired = (&resources.Resources{
+				Cpu:    quota.Status.Used.Cpu().ScaledValue(resource.Milli),
+				Memory: ResourceQuotaUsedMemoryLimit(&quota).ScaledValue(resource.Mega),
+			}).Add(sum).Max(desired)
+		}
+	}
+
+	storage := quota.Spec.Hard["requests.storage"]
+	validatedScaler.ForceLimitToDefaultMax()
+	desired.Max(&resources.Resources{Cpu: validatedScaler.MinCpu, Memory: validatedScaler.MinMemory})
+	desired.Limit(&resources.Resources{Cpu: validatedScaler.MaxCpu, Memory: validatedScaler.MaxMemory})
+	desired.Storage = storage.ScaledValue(resource.Giga)
+	desired.ForceNoScaleDownWhenScaleUp(&quota)
+	if !desired.DiffersFrom(&quota) || desired.IsScaleDown(&quota) {
+		return false
+	}
+
+	current := resources.Resources{
+		Cpu:     quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
+		Memory:  quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
+		Storage: storage.ScaledValue(resource.Giga),
+	}
+	return EnsureScaleUpFitsCluster(watcher.Client, current, *desired) != nil
 }

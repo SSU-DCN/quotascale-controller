@@ -19,11 +19,13 @@ import (
 
 type captureScaleOutRequestHandler struct {
 	called  bool
+	count   int
 	request nodescaling.ScaleOutRequest
 }
 
 func (handler *captureScaleOutRequestHandler) HandleScaleOutRequest(request nodescaling.ScaleOutRequest) error {
 	handler.called = true
+	handler.count++
 	handler.request = request
 	return nil
 }
@@ -253,6 +255,92 @@ func TestUpdateQuotaIfRequiredDefersQuotaResizeAfterScaleOutRequest(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "node scale-out requested; waiting for worker capacity before resizing quota") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateQuotaIfRequiredDeduplicatesPendingScaleOutRequests(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: corev1.NodeStatus{
+				Allocatable: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+	)
+
+	handler := &captureScaleOutRequestHandler{}
+	watcher := &QuotaWatcher{
+		Client:                 client,
+		ScaleOutRequestHandler: handler,
+		pendingScaleOut:        map[string]struct{}{},
+	}
+
+	quota := corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "quota",
+			Namespace: "default",
+		},
+		Spec: corev1.ResourceQuotaSpec{
+			Hard: corev1.ResourceList{
+				corev1.ResourceCPU:          resource.MustParse("1"),
+				corev1.ResourceMemory:       resource.MustParse("1Gi"),
+				corev1.ResourceLimitsCPU:    resource.MustParse("1"),
+				corev1.ResourceLimitsMemory: resource.MustParse("1Gi"),
+			},
+		},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+			Used: corev1.ResourceList{
+				corev1.ResourceCPU:          resource.MustParse("900m"),
+				corev1.ResourceMemory:       resource.MustParse("512Mi"),
+				corev1.ResourceLimitsCPU:    resource.MustParse("900m"),
+				corev1.ResourceLimitsMemory: resource.MustParse("512Mi"),
+			},
+		},
+	}
+
+	scaler := scalerv1.QuotaAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "quotascale-controller",
+			Namespace: "default",
+		},
+		Spec: scalerv1.QuotaAutoscalerSpec{
+			ResourceQuota: "quota",
+			MaxCpu:        "4",
+			MaxMemory:     "8Gi",
+			Behavior: scalerv1.QuotaAutoscalerSpecBehavior{
+				ScaleUp: scalerv1.QuotaScaleBehavior{
+					Policies: []scalerv1.QuotaScalePolicy{
+						{
+							Method:            "cpu",
+							Value:             80,
+							TargetUtilization: 50,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := watcher.UpdateQuotaIfRequired(quota, scaler, nil)
+	if err == nil {
+		t.Fatalf("expected deferred result after first scale-out request")
+	}
+	err = watcher.UpdateQuotaIfRequired(quota, scaler, nil)
+	if err == nil {
+		t.Fatalf("expected deferred result while scale-out is still pending")
+	}
+	if handler.count != 1 {
+		t.Fatalf("expected only one scale-out request to be sent while pending, got %d", handler.count)
+	}
+	if !strings.Contains(err.Error(), "node scale-out already pending") {
+		t.Fatalf("unexpected second deferred error: %v", err)
 	}
 }
 
