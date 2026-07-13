@@ -48,7 +48,8 @@ The node scaling controller is optional and is enabled with `--enable-node-scali
 Its responsibilities are:
 
 - maintain a `NodeScalingInventory` that reflects observed scaling nodes plus desired `MachineDeployment` replicas
-- activate a reserved scaling node when quota scale-out needs more cluster capacity
+- keep a configurable number of warm spare scaling nodes prepared
+- activate one or more prepared spare nodes when quota scale-out needs more cluster capacity
 - update a Git-managed `MachineDeployment` replica count
 - evaluate automatic scale-in after managed quota totals fit without scaling-tainted nodes for a configured delay
 - reserve multiple scale-in candidates concurrently and reuse lower-order candidates first when a new scale-out arrives
@@ -174,7 +175,7 @@ The maximum MachineDeployment replica count for node scaling is capped by `--nod
 
 Important runtime behavior:
 
-- if the manifest starts with `spec.replicas: 0`, startup baseline reconciliation changes it to `1`
+- if the manifest starts with `spec.replicas: 0`, startup baseline reconciliation changes it to `--node-scaling-prepared-spares`
 - `spec.replicas` updates preserve the rest of the YAML document and write with 2-space indentation
 - if the repo already exists locally and a pull fails, the controller can keep operating from the existing local checkout as long as the configured manifest is still readable
 - git commit and push operations emit `INFO` logs that include the manifest path, repository, branch, and commit hash
@@ -182,21 +183,23 @@ Important runtime behavior:
 ### Scale-out sequence
 
 1. The quota controller detects that desired quota exceeds current worker capacity.
-2. The node scaling controller first tries to reuse a node that is already in a scale-in waiter.
-3. If several waiters exist, the lower-order waiter is reused first and only that waiter is cancelled.
-4. If no reusable waiter exists, the controller activates the first unused scaling node from `NodeScalingInventory`.
-5. If needed, it increments the Git-managed `MachineDeployment` replica count, updates `NodeScalingInventory`, commits, and pushes the manifest change.
+2. The node scaling controller first tries to reuse nodes that are already in scale-in waiters.
+3. If several waiters exist, the lower-order waiters are reused first and only the reused waiters are cancelled.
+4. If more capacity is still needed, the controller activates additional unused prepared spare nodes from `NodeScalingInventory`, up to `--node-scaling-activated-spares` in one reconcile.
+5. For every prepared spare node consumed this way, the controller increases the Git-managed `MachineDeployment` replica count to replenish the warm spare pool, updates `NodeScalingInventory`, commits, and pushes the manifest change.
+6. If the configured `--node-scaling-max-nodes` cap is already reached, existing prepared spare nodes can still be activated, but spare-pool replenishment is capped by that maximum.
 
 ### Scale-in sequence
 
 1. Automatic scale-in becomes eligible only after managed quota limits fit within non-scaling capacity for `--node-scale-in-delay`.
-2. Existing unused scaling nodes are removed from desired `MachineDeployment` replicas first, down to a hard minimum baseline of `1`.
+2. Existing unused scaling nodes are removed from desired `MachineDeployment` replicas first, but never below `--node-scaling-prepared-spares`.
 3. Additional used scaling nodes can be reserved in parallel for future scale-in.
 4. Reserved nodes are marked with the scaling label and `NoSchedule` taint, then watched asynchronously until they no longer have blocking pods.
 5. When a reserved node drains, it is marked unused in `NodeScalingInventory` and another scale-in reconcile is queued.
 6. If `--enable-node-scale-in-force=true`, a waiter can also be force-completed after `--node-scale-in-force-delay` even when blocking pods still remain.
 7. If `--enable-node-scale-in-force=false`, the waiter remains active indefinitely until the blocking pods are gone.
 8. If a new scale-out request arrives while scale-in waiters are active, only the reused lower-order waiter is cancelled; the other waiters continue.
+9. The same prepared-spare minimum also applies to automatic scale-in eligibility, so the controller does not keep scaling in once it has reached the configured warm spare floor.
 
 ### What counts as a blocking pod during scale-in
 
@@ -262,6 +265,8 @@ In that case, install the CRD first.
 | `--node-scale-in-exempt-pod-key` | Label or annotation key that marks a pod as scale-in exempt | `quotascale.dcn.ssu.ac.kr/scale-in-exempt` |
 | `--node-scale-in-exempt-pod-value` | Label or annotation value that marks a pod as scale-in exempt | `true` |
 | `--node-scaling-max-nodes` | Maximum MachineDeployment replica count allowed for node scaling | `3` |
+| `--node-scaling-prepared-spares` | Minimum number of warm spare scaling nodes that should remain prepared | `1` |
+| `--node-scaling-activated-spares` | Maximum number of prepared spare nodes to activate in a single scale-out reconcile | `1` |
 | `--node-scaling-repo-url` | Git repository URL for node scaling manifests | `""` |
 | `--node-scaling-repo-branch` | Git branch for node scaling manifests | `""` |
 | `--node-scaling-repo-file-path` | Path to the MachineDeployment manifest inside the node scaling repo | `""` |

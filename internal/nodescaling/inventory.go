@@ -239,8 +239,19 @@ func normalizeNodeNames(nodeNames []string) []string {
 }
 
 func FindFirstUnusedInventoryNode(inventory *inventoryv1.NodeScalingInventory) (*inventoryv1.NodeScalingInventoryNode, error) {
+	nodes, err := FindUnusedInventoryNodes(inventory, 1)
+	if err != nil {
+		return nil, err
+	}
+	return &nodes[0], nil
+}
+
+func FindUnusedInventoryNodes(inventory *inventoryv1.NodeScalingInventory, limit int) ([]inventoryv1.NodeScalingInventoryNode, error) {
 	if inventory == nil {
 		return nil, fmt.Errorf("node scaling inventory is nil")
+	}
+	if limit <= 0 {
+		return []inventoryv1.NodeScalingInventoryNode{}, nil
 	}
 
 	nodes := append([]inventoryv1.NodeScalingInventoryNode(nil), inventory.Spec.Nodes...)
@@ -251,14 +262,21 @@ func FindFirstUnusedInventoryNode(inventory *inventoryv1.NodeScalingInventory) (
 		return nodes[i].Order < nodes[j].Order
 	})
 
+	selected := make([]inventoryv1.NodeScalingInventoryNode, 0, limit)
 	for _, node := range nodes {
 		if node.Used {
 			continue
 		}
-		return &node, nil
+		selected = append(selected, node)
+		if len(selected) == limit {
+			break
+		}
 	}
 
-	return nil, fmt.Errorf("no unused scaling nodes available in inventory")
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no unused scaling nodes available in inventory")
+	}
+	return selected, nil
 }
 
 func FindHighestOrderUsedInventoryNode(inventory *inventoryv1.NodeScalingInventory) (*inventoryv1.NodeScalingInventoryNode, error) {

@@ -30,7 +30,8 @@ func (controller *NodeScalingController) EvaluateAutomaticScaleIn() error {
 	if err != nil {
 		return err
 	}
-	if replicas <= minNodeCount {
+	minReplicas := controller.minimumPreparedSpareCount()
+	if replicas <= minReplicas {
 		controller.resetScaleInTrigger()
 		return nil
 	}
@@ -87,7 +88,8 @@ func (controller *NodeScalingController) EvaluateScaleInCapacity() (*ScaleInCapa
 		return nil, err
 	}
 
-	candidates, err := FindHighestOrderUsedInventoryNodes(inventory, int(replicas-minNodeCount))
+	minReplicas := controller.minimumPreparedSpareCount()
+	candidates, err := FindHighestOrderUsedInventoryNodes(inventory, int(replicas-minReplicas))
 	if err != nil {
 		return nil, err
 	}

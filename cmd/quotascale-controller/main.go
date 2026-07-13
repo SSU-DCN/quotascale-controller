@@ -32,6 +32,8 @@ func main() {
 	nodeScaleInExemptPodKey := flag.String("node-scale-in-exempt-pod-key", "quotascale.dcn.ssu.ac.kr/scale-in-exempt", "Label or annotation key marking pods that should not block node scale-in.")
 	nodeScaleInExemptPodValue := flag.String("node-scale-in-exempt-pod-value", "true", "Label or annotation value marking pods that should not block node scale-in.")
 	nodeScalingMaxNodes := flag.Int("node-scaling-max-nodes", 3, "Maximum MachineDeployment replica count allowed for node scaling.")
+	nodeScalingPreparedSpares := flag.Int("node-scaling-prepared-spares", 1, "How many warm spare scaling nodes should remain prepared by default.")
+	nodeScalingActivatedSpares := flag.Int("node-scaling-activated-spares", 1, "How many prepared spare nodes should be activated (untainted) per scale-out reconciliation.")
 	nodeScalingRepoURL := flag.String("node-scaling-repo-url", "", "Git repository URL for node scaling MachineDeployment manifests. Overrides GITEA_REPO_URL when set.")
 	nodeScalingRepoBranch := flag.String("node-scaling-repo-branch", "", "Git branch for node scaling manifests. Overrides GITEA_REPO_BRANCH when set.")
 	nodeScalingRepoFilePath := flag.String("node-scaling-repo-file-path", "", "Path to the MachineDeployment manifest inside the node scaling repo. Overrides GITEA_REPO_FILE_PATH when set.")
@@ -83,6 +85,8 @@ func main() {
 		nodeScalingController.SetScaleInExemptNamespaces(strings.Split(*nodeScaleInExemptNamespaces, ","))
 		nodeScalingController.SetScaleInExemptPodMarker(*nodeScaleInExemptPodKey, *nodeScaleInExemptPodValue)
 		nodeScalingController.SetMaxNodeCount(int32(*nodeScalingMaxNodes))
+		nodeScalingController.SetPreparedSpareCount(int32(*nodeScalingPreparedSpares))
+		nodeScalingController.SetActivatedSpareCount(int32(*nodeScalingActivatedSpares))
 		scaleOutRequestHandler = nodeScalingController
 		go nodeScalingController.Run()
 	}

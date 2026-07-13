@@ -96,6 +96,31 @@ func TestNodeScalingControllerEnsureMachineDeploymentReplicaBaselineSetsZeroToOn
 	}
 }
 
+func TestNodeScalingControllerEnsureMachineDeploymentReplicaBaselineUsesPreparedSpareCount(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(0))
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, nil, nil, time.Minute)
+	controller.SetPreparedSpareCount(2)
+
+	if err := controller.EnsureMachineDeploymentReplicaBaseline(); err != nil {
+		t.Fatalf("expected baseline reconcile to succeed, got error: %v", err)
+	}
+
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected replica read to succeed, got error: %v", err)
+	}
+	if replicas != 2 {
+		t.Fatalf("expected replicas to be initialized to prepared spare count 2, got %d", replicas)
+	}
+}
+
 func TestNodeScalingControllerSyncScalingNodeInventoryUsesScalingNodes(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
@@ -288,6 +313,77 @@ func TestNodeScalingControllerReconcileScaleOutActivatesInventoryNodeAndIncremen
 	}
 }
 
+func TestNodeScalingControllerReconcileScaleOutActivatesMultiplePreparedSpares(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 3,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: false},
+					{Name: "node-b", Order: 2, Used: false},
+					{Name: "node-c", Order: 3, Used: true},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-a",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "node-b",
+				Labels: map[string]string{
+					"role":                            "scaling",
+					"node-role.kubernetes.io/scaling": "",
+				},
+			},
+			Spec: v12.NodeSpec{
+				Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}},
+			},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoFilePath: defaultNodeScalingFile,
+		},
+		RepoDir: repoDir,
+	}, client, store, time.Minute)
+	controller.SetMaxNodeCount(10)
+	controller.SetActivatedSpareCount(2)
+
+	if err := controller.ReconcileScaleOut(ScaleOutRequest{
+		Namespace: "default",
+		Reason:    "capacity exceeded",
+	}); err != nil {
+		t.Fatalf("expected reconcile to succeed, got error: %v", err)
+	}
+
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected replica read to succeed, got error: %v", err)
+	}
+	if replicas != 5 {
+		t.Fatalf("expected replicas to increase to 5, got %d", replicas)
+	}
+	if !store.inventory.Spec.Nodes[0].Used || !store.inventory.Spec.Nodes[1].Used {
+		t.Fatalf("expected both prepared spare nodes to be marked used")
+	}
+}
+
 func TestNodeScalingControllerReconcileScaleOutHonorsMaxNodeCount(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
@@ -331,8 +427,8 @@ func TestNodeScalingControllerReconcileScaleOutHonorsMaxNodeCount(t *testing.T) 
 		Namespace: "default",
 		Reason:    "capacity exceeded",
 	})
-	if err == nil {
-		t.Fatalf("expected reconcile to fail at max node count")
+	if err != nil {
+		t.Fatalf("expected reconcile to activate existing spare even at max node count, got error: %v", err)
 	}
 
 	replicas, readErr := controller.runtime.ReadMachineDeploymentReplicas()
@@ -340,21 +436,21 @@ func TestNodeScalingControllerReconcileScaleOutHonorsMaxNodeCount(t *testing.T) 
 		t.Fatalf("expected replica read to succeed, got error: %v", readErr)
 	}
 	if replicas != 3 {
-		t.Fatalf("expected replicas to stay at 3, got %d", replicas)
+		t.Fatalf("expected replicas to stay capped at 3, got %d", replicas)
 	}
-	if store.inventory.Spec.Nodes[0].Used {
-		t.Fatalf("expected inventory node to remain unused when max node count is reached")
+	if !store.inventory.Spec.Nodes[0].Used {
+		t.Fatalf("expected existing prepared spare to be activated even when max node count is reached")
 	}
 
 	node, getErr := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
 	if getErr != nil {
 		t.Fatalf("expected node read to succeed, got error: %v", getErr)
 	}
-	if _, exists := node.Labels["role"]; !exists {
-		t.Fatalf("expected scaling reservation labels to remain untouched when max node count is reached")
+	if _, exists := node.Labels["role"]; exists {
+		t.Fatalf("expected scaling reservation labels to be removed when activating existing spare")
 	}
-	if len(node.Spec.Taints) != 1 || node.Spec.Taints[0].Key != "node-role.kubernetes.io/scaling" {
-		t.Fatalf("expected scaling taint to remain untouched, got taints %#v", node.Spec.Taints)
+	if len(node.Spec.Taints) != 0 {
+		t.Fatalf("expected scaling taint to be removed when activating existing spare, got taints %#v", node.Spec.Taints)
 	}
 }
 
@@ -995,6 +1091,48 @@ func TestNodeScalingControllerReconcileScaleInSkipsAtMinimumBaseline(t *testing.
 	}
 	if replicas != 1 {
 		t.Fatalf("expected replicas to stay at baseline 1, got %d", replicas)
+	}
+}
+
+func TestNodeScalingControllerReconcileScaleInSkipsAtPreparedSpareBaseline(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 2,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: false},
+					{Name: "node-b", Order: 2, Used: false},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+	controller.SetPreparedSpareCount(2)
+
+	if err := controller.ReconcileScaleIn(ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	}); err != nil {
+		t.Fatalf("expected scale-in to be skipped cleanly at prepared spare baseline, got error: %v", err)
+	}
+
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected replica read to succeed, got error: %v", err)
+	}
+	if replicas != 2 {
+		t.Fatalf("expected replicas to stay at prepared spare baseline 2, got %d", replicas)
 	}
 }
 

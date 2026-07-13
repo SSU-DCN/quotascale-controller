@@ -22,7 +22,8 @@ const (
 	defaultScaleInTriggerDelay = 5 * time.Minute
 	defaultScaleInForceDelay   = 5 * time.Minute
 	defaultMaxNodeCount        = int32(3)
-	minNodeCount               = int32(1)
+	defaultPreparedSpareCount  = int32(1)
+	defaultActivatedSpareCount = int32(1)
 	defaultScaleInExemptPodKey = "quotascale.dcn.ssu.ac.kr/scale-in-exempt"
 )
 
@@ -64,6 +65,8 @@ type NodeScalingController struct {
 	scaleInForceEnabled   bool
 	scaleInForceDelay     time.Duration
 	maxNodeCount          int32
+	preparedSpareCount    int32
+	activatedSpareCount   int32
 	scaleInExemptKey      string
 	scaleInExemptValue    string
 	scaleInExemptNS       map[string]struct{}
@@ -92,14 +95,16 @@ func NewNodeScalingController(runtime *NodeScalingRuntime, client kubernetes.Int
 		scaleInForceEnabled:   true,
 		scaleInForceDelay:     defaultScaleInForceDelay,
 		maxNodeCount:          defaultMaxNodeCount,
+		preparedSpareCount:    defaultPreparedSpareCount,
+		activatedSpareCount:   defaultActivatedSpareCount,
 		scaleInExemptKey:      defaultScaleInExemptPodKey,
 		scaleInExemptValue:    "true",
 		scaleInExemptNS: map[string]struct{}{
 			"kube-system": {},
 		},
-		scaleOutRequests:      make(chan ScaleOutRequest, 128),
-		scaleInRequests:       make(chan ScaleInRequest, 128),
-		scaleInWaiters:        map[string]scaleInWaiter{},
+		scaleOutRequests: make(chan ScaleOutRequest, 128),
+		scaleInRequests:  make(chan ScaleInRequest, 128),
+		scaleInWaiters:   map[string]scaleInWaiter{},
 	}
 }
 
@@ -119,6 +124,20 @@ func (controller *NodeScalingController) SetMaxNodeCount(count int32) {
 		count = defaultMaxNodeCount
 	}
 	controller.maxNodeCount = count
+}
+
+func (controller *NodeScalingController) SetPreparedSpareCount(count int32) {
+	if count <= 0 {
+		count = defaultPreparedSpareCount
+	}
+	controller.preparedSpareCount = count
+}
+
+func (controller *NodeScalingController) SetActivatedSpareCount(count int32) {
+	if count <= 0 {
+		count = defaultActivatedSpareCount
+	}
+	controller.activatedSpareCount = count
 }
 
 func (controller *NodeScalingController) SetScaleInForceDelay(delay time.Duration) {
@@ -237,8 +256,41 @@ func (controller *NodeScalingController) ReconcileScaleOut(request ScaleOutReque
 		return err
 	}
 
-	if nodeName, ok := controller.FindReusableScaleInWaiterNode(inventory); ok {
-		controller.resetScaleInTrigger()
+	activationLimit := controller.scaleOutBatchSize()
+	waiterNodes := controller.FindReusableScaleInWaiterNodes(inventory, activationLimit)
+	unusedNodes := []inventoryv1.NodeScalingInventoryNode{}
+	if remaining := activationLimit - len(waiterNodes); remaining > 0 {
+		selectedUnusedNodes, selectErr := FindUnusedInventoryNodes(inventory, remaining)
+		if selectErr == nil {
+			unusedNodes = selectedUnusedNodes
+		} else if len(waiterNodes) == 0 {
+			if controller.maxNodeCount > 0 && replicas >= controller.maxNodeCount {
+				return fmt.Errorf(
+					"node scale-out requested for namespace %s, but MachineDeployment replicas %d already reached configured max node count %d and no prepared spare nodes are available",
+					request.Namespace,
+					replicas,
+					controller.maxNodeCount,
+				)
+			}
+			return selectErr
+		}
+	}
+	if len(waiterNodes) == 0 && len(unusedNodes) == 0 {
+		return fmt.Errorf("node scale-out requested for namespace %s, but no reusable or prepared spare nodes are available", request.Namespace)
+	}
+
+	replenishCount := int32(len(unusedNodes))
+	targetReplicas := replicas + replenishCount
+	if controller.maxNodeCount > 0 && targetReplicas > controller.maxNodeCount {
+		targetReplicas = controller.maxNodeCount
+		replenishCount = targetReplicas - replicas
+		if replenishCount < 0 {
+			replenishCount = 0
+		}
+	}
+
+	activatedNodeNames := make([]string, 0, len(waiterNodes)+len(unusedNodes))
+	for _, nodeName := range waiterNodes {
 		controller.StopScaleInWaiter(nodeName)
 		if err := controller.ActivateScalingNode(nodeName); err != nil {
 			return err
@@ -246,58 +298,42 @@ func (controller *NodeScalingController) ReconcileScaleOut(request ScaleOutReque
 		if err := controller.inventoryStore.MarkNodeUsed(nodeName); err != nil {
 			return err
 		}
-
-		logging.LogInfo(
-			"[%s] Node scale-out requested (reason: %s). Reused node %s from active scale-in waiter; MachineDeployment replicas stay at %d; quota current=%+v desired=%+v",
-			request.Namespace,
-			request.Reason,
-			nodeName,
-			replicas,
-			request.Current,
-			request.Desired,
-		)
-		return nil
+		activatedNodeNames = append(activatedNodeNames, nodeName)
 	}
-
-	node, err := FindFirstUnusedInventoryNode(inventory)
-	if err != nil {
-		return err
-	}
-
-	if controller.maxNodeCount > 0 && replicas >= controller.maxNodeCount {
-		return fmt.Errorf(
-			"node scale-out requested for namespace %s, but MachineDeployment replicas %d already reached configured max node count %d",
-			request.Namespace,
-			replicas,
-			controller.maxNodeCount,
-		)
-	}
-	if err := controller.ActivateScalingNode(node.Name); err != nil {
-		return err
+	for _, node := range unusedNodes {
+		if err := controller.ActivateScalingNode(node.Name); err != nil {
+			return err
+		}
+		if err := controller.inventoryStore.MarkNodeUsed(node.Name); err != nil {
+			return err
+		}
+		activatedNodeNames = append(activatedNodeNames, node.Name)
 	}
 	controller.resetScaleInTrigger()
-	if err := controller.inventoryStore.MarkNodeUsed(node.Name); err != nil {
-		return err
-	}
-	if err := controller.runtime.WriteMachineDeploymentReplicas(replicas + 1); err != nil {
-		return err
-	}
-	if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(replicas + 1); err != nil {
-		return err
-	}
-	if controller.runtime.Config.RepoURL != "" {
-		if err := controller.runtime.CommitAndPush(fmt.Sprintf("Scale up node MachineDeployment to %d", replicas+1)); err != nil {
+
+	if targetReplicas != replicas {
+		if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
 			return err
+		}
+		if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
+			return err
+		}
+		if controller.runtime.Config.RepoURL != "" {
+			if err := controller.runtime.CommitAndPush(fmt.Sprintf("Scale up node MachineDeployment to %d", targetReplicas)); err != nil {
+				return err
+			}
 		}
 	}
 
 	logging.LogInfo(
-		"[%s] Node scale-out requested (reason: %s). Activated node %s and increased MachineDeployment replicas from %d to %d; quota current=%+v desired=%+v",
+		"[%s] Node scale-out requested (reason: %s). Activated nodes %s (reused waiters=%d, prepared spares=%d); MachineDeployment replicas %d -> %d; quota current=%+v desired=%+v",
 		request.Namespace,
 		request.Reason,
-		node.Name,
+		strings.Join(activatedNodeNames, ", "),
+		len(waiterNodes),
+		len(unusedNodes),
 		replicas,
-		replicas+1,
+		targetReplicas,
 		request.Current,
 		request.Desired,
 	)
@@ -319,12 +355,13 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 	if err != nil {
 		return err
 	}
-	if replicas <= minNodeCount {
+	minReplicas := controller.minimumPreparedSpareCount()
+	if replicas <= minReplicas {
 		logging.LogInfo(
-			"[%s] Node scale-in skipped (reason: %s). MachineDeployment replicas already at minimum baseline %d",
+			"[%s] Node scale-in skipped (reason: %s). MachineDeployment replicas already at minimum prepared spare baseline %d",
 			request.Namespace,
 			request.Reason,
-			minNodeCount,
+			minReplicas,
 		)
 		return nil
 	}
@@ -340,7 +377,7 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 
 	unusedCount := CountUnusedInventoryNodes(inventory)
 	if unusedCount == 0 {
-		reservedNodes, err := controller.reserveScaleInCandidates(inventory, int(replicas-minNodeCount), request)
+		reservedNodes, err := controller.reserveScaleInCandidates(inventory, int(replicas-minReplicas), request)
 		if err != nil {
 			return err
 		}
@@ -360,8 +397,8 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 	}
 
 	targetReplicas := replicas - int32(unusedCount)
-	if targetReplicas < minNodeCount {
-		targetReplicas = minNodeCount
+	if targetReplicas < minReplicas {
+		targetReplicas = minReplicas
 	}
 	if targetReplicas != replicas {
 		if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
@@ -425,16 +462,17 @@ func (controller *NodeScalingController) EnsureMachineDeploymentReplicaBaseline(
 		return nil
 	}
 
-	if err := controller.runtime.WriteMachineDeploymentReplicas(1); err != nil {
+	targetReplicas := controller.minimumPreparedSpareCount()
+	if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
 		return err
 	}
 	if controller.runtime.Config.RepoURL != "" {
-		if err := controller.runtime.CommitAndPush("Initialize node scaling MachineDeployment replicas to 1"); err != nil {
+		if err := controller.runtime.CommitAndPush(fmt.Sprintf("Initialize node scaling MachineDeployment replicas to %d", targetReplicas)); err != nil {
 			return err
 		}
 	}
 
-	logging.LogInfo("Node scaling MachineDeployment replicas initialized from 0 to 1")
+	logging.LogInfo("Node scaling MachineDeployment replicas initialized from 0 to %d", targetReplicas)
 	return nil
 }
 
@@ -730,6 +768,18 @@ func (controller *NodeScalingController) ShouldForceScaleIn(nodeName string) (ti
 }
 
 func (controller *NodeScalingController) FindReusableScaleInWaiterNode(inventory *inventoryv1.NodeScalingInventory) (string, bool) {
+	nodes := controller.FindReusableScaleInWaiterNodes(inventory, 1)
+	if len(nodes) == 0 {
+		return "", false
+	}
+	return nodes[0], true
+}
+
+func (controller *NodeScalingController) FindReusableScaleInWaiterNodes(inventory *inventoryv1.NodeScalingInventory, limit int) []string {
+	if inventory == nil || limit <= 0 {
+		return []string{}
+	}
+
 	controller.scaleInWaitersMu.Lock()
 	activeWaiters := make(map[string]struct{}, len(controller.scaleInWaiters))
 	for nodeName := range controller.scaleInWaiters {
@@ -738,7 +788,7 @@ func (controller *NodeScalingController) FindReusableScaleInWaiterNode(inventory
 	controller.scaleInWaitersMu.Unlock()
 
 	if len(activeWaiters) == 0 {
-		return "", false
+		return []string{}
 	}
 
 	nodes := append([]inventoryv1.NodeScalingInventoryNode(nil), inventory.Spec.Nodes...)
@@ -749,6 +799,7 @@ func (controller *NodeScalingController) FindReusableScaleInWaiterNode(inventory
 		return nodes[i].Order < nodes[j].Order
 	})
 
+	selected := make([]string, 0, limit)
 	for _, node := range nodes {
 		if !node.Used {
 			continue
@@ -756,10 +807,27 @@ func (controller *NodeScalingController) FindReusableScaleInWaiterNode(inventory
 		if _, exists := activeWaiters[node.Name]; !exists {
 			continue
 		}
-		return node.Name, true
+		selected = append(selected, node.Name)
+		if len(selected) == limit {
+			break
+		}
 	}
 
-	return "", false
+	return selected
+}
+
+func (controller *NodeScalingController) minimumPreparedSpareCount() int32 {
+	if controller.preparedSpareCount <= 0 {
+		return defaultPreparedSpareCount
+	}
+	return controller.preparedSpareCount
+}
+
+func (controller *NodeScalingController) scaleOutBatchSize() int {
+	if controller.activatedSpareCount <= 0 {
+		return int(defaultActivatedSpareCount)
+	}
+	return int(controller.activatedSpareCount)
 }
 
 func isDaemonSetPod(pod *v12.Pod) bool {
