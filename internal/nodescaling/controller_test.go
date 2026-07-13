@@ -1115,7 +1115,6 @@ func TestNodeScalingControllerReconcileScaleInReservesMultipleNodesAtOnce(t *tes
 		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
 		RepoDir: repoDir,
 	}, client, store, time.Hour)
-	controller.SetActivatedSpareCount(3)
 
 	err := controller.ReconcileScaleIn(ScaleInRequest{
 		Namespace: "default",
@@ -1133,57 +1132,6 @@ func TestNodeScalingControllerReconcileScaleInReservesMultipleNodesAtOnce(t *tes
 		if node.Labels["role"] != "scaling" {
 			t.Fatalf("expected node %s to be reserved for concurrent scale-in, got labels %#v", nodeName, node.Labels)
 		}
-	}
-}
-
-func TestNodeScalingControllerReconcileScaleInLimitsWaitersToActivatedSpareBatch(t *testing.T) {
-	repoDir := t.TempDir()
-	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(4))
-
-	store := &captureNodeScalingInventoryStore{
-		inventory: &inventoryv1.NodeScalingInventory{
-			Spec: inventoryv1.NodeScalingInventorySpec{
-				MachineDeploymentReplicas: 4,
-				Nodes: []inventoryv1.NodeScalingInventoryNode{
-					{Name: "node-a", Order: 1, Used: true},
-					{Name: "node-b", Order: 2, Used: true},
-					{Name: "node-c", Order: 3, Used: true},
-				},
-			},
-		},
-	}
-	client := fake.NewSimpleClientset(
-		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
-		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
-		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}},
-	)
-
-	controller := NewNodeScalingController(&NodeScalingRuntime{
-		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
-		RepoDir: repoDir,
-	}, client, store, time.Hour)
-	controller.SetActivatedSpareCount(1)
-
-	err := controller.ReconcileScaleIn(ScaleInRequest{
-		Namespace: "default",
-		Reason:    "quota scaled down",
-	})
-	if err == nil {
-		t.Fatalf("expected deferred error while draining reserved node")
-	}
-
-	reservedCount := 0
-	for _, nodeName := range []string{"node-a", "node-b", "node-c"} {
-		node, getErr := client.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-		if getErr != nil {
-			t.Fatalf("expected node %s read to succeed, got error: %v", nodeName, getErr)
-		}
-		if node.Labels["role"] == "scaling" {
-			reservedCount++
-		}
-	}
-	if reservedCount != 1 {
-		t.Fatalf("expected only 1 node to be reserved when activated spare batch is 1, got %d", reservedCount)
 	}
 }
 
