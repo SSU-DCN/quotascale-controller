@@ -647,14 +647,13 @@ func TestNodeScalingControllerReconcileScaleInShrinksReplicasUsingUnusedNodesOnl
 				Nodes: []inventoryv1.NodeScalingInventoryNode{
 					{Name: "node-a", Order: 1, Used: true},
 					{Name: "node-b", Order: 2, Used: false},
-					{Name: "node-c", Order: 3, Used: true},
+					{Name: "node-c", Order: 3, Used: false},
 				},
 			},
 		},
 	}
 	client := fake.NewSimpleClientset(
 		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
-		&v12.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-c"}},
 	)
 
 	controller := NewNodeScalingController(&NodeScalingRuntime{
@@ -681,7 +680,7 @@ func TestNodeScalingControllerReconcileScaleInShrinksReplicasUsingUnusedNodesOnl
 		t.Fatalf("expected inventory replicas to be updated to 4, got %d", store.inventory.Spec.MachineDeploymentReplicas)
 	}
 
-	node, err := client.CoreV1().Nodes().Get(context.TODO(), "node-c", metav1.GetOptions{})
+	node, err := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("expected node read to succeed, got error: %v", err)
 	}
@@ -690,6 +689,90 @@ func TestNodeScalingControllerReconcileScaleInShrinksReplicasUsingUnusedNodesOnl
 	}
 	if len(node.Spec.Taints) != 0 {
 		t.Fatalf("expected no additional reservation taint when unused nodes already exist, got taints %#v", node.Spec.Taints)
+	}
+}
+
+func TestNodeScalingControllerReconcileScaleInPreservesPreparedUnusedSpareFloor(t *testing.T) {
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
+
+	store := &captureNodeScalingInventoryStore{
+		inventory: &inventoryv1.NodeScalingInventory{
+			Spec: inventoryv1.NodeScalingInventorySpec{
+				MachineDeploymentReplicas: 3,
+				Nodes: []inventoryv1.NodeScalingInventoryNode{
+					{Name: "node-a", Order: 1, Used: true},
+					{Name: "node-b", Order: 2, Used: false},
+					{Name: "node-c", Order: 3, Used: false},
+				},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("4"),
+					v12.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("2"),
+					v12.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+		&v12.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{Name: "quota-a", Namespace: "default"},
+			Spec: v12.ResourceQuotaSpec{
+				Hard: v12.ResourceList{
+					v12.ResourceLimitsCPU:    resource.MustParse("2"),
+					v12.ResourceLimitsMemory: resource.MustParse("2Gi"),
+				},
+			},
+		},
+	)
+	scalerClient := scalerfake.NewSimpleClientset(
+		&scalerv1.QuotaAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{Name: "scaler-a", Namespace: "default"},
+			Spec:       scalerv1.QuotaAutoscalerSpec{ResourceQuota: "quota-a"},
+		},
+	)
+
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
+		RepoDir: repoDir,
+	}, client, store, time.Hour)
+	controller.SetPreparedSpareCount(2)
+	controller.SetQuotaAutoscalerClient(scalerClient)
+
+	err := controller.ReconcileScaleIn(ScaleInRequest{
+		Namespace: "default",
+		Reason:    "quota scaled down",
+	})
+	if err == nil {
+		t.Fatalf("expected deferred error while draining the used scaling node")
+	}
+
+	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected replica read to succeed, got error: %v", err)
+	}
+	if replicas != 3 {
+		t.Fatalf("expected replicas to stay at 3 while preserving 2 prepared unused spares, got %d", replicas)
+	}
+
+	node, err := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected node read to succeed, got error: %v", err)
+	}
+	if node.Labels["role"] != "scaling" {
+		t.Fatalf("expected the used scaling node to enter drain waiter instead of shrinking replicas immediately, got labels %#v", node.Labels)
 	}
 }
 
@@ -1072,7 +1155,6 @@ func TestNodeScalingControllerReconcileScaleInSkipsAtMinimumBaseline(t *testing.
 
 	controller := NewNodeScalingController(&NodeScalingRuntime{
 		Config: NodeScalingConfig{
-			RepoURL:      "http://invalid.example.local/repo.git",
 			RepoFilePath: defaultNodeScalingFile,
 		},
 		RepoDir: repoDir,

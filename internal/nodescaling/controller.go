@@ -355,16 +355,6 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 	if err != nil {
 		return err
 	}
-	minReplicas := controller.minimumPreparedSpareCount()
-	if replicas <= minReplicas {
-		logging.LogInfo(
-			"[%s] Node scale-in skipped (reason: %s). MachineDeployment replicas already at minimum prepared spare baseline %d",
-			request.Namespace,
-			request.Reason,
-			minReplicas,
-		)
-		return nil
-	}
 
 	if err := controller.syncRepoIfConfigured(); err != nil {
 		return err
@@ -375,47 +365,76 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		return err
 	}
 
+	preparedSpareCount := int(controller.minimumPreparedSpareCount())
 	unusedCount := CountUnusedInventoryNodes(inventory)
-	if unusedCount == 0 {
-		reservedNodes, err := controller.reserveScaleInCandidates(inventory, int(replicas-minReplicas), request)
+	excessUnused := unusedCount - preparedSpareCount
+	if excessUnused > 0 {
+		replicas, err = controller.runtime.ReadMachineDeploymentReplicas()
 		if err != nil {
 			return err
 		}
-		if len(reservedNodes) == 0 {
-			return &NodeScalingDeferredError{
-				Reason: "waiting for reserved scaling nodes to finish draining",
+
+		targetReplicas := replicas - int32(excessUnused)
+		if targetReplicas < 0 {
+			targetReplicas = 0
+		}
+		if targetReplicas != replicas {
+			if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
+				return err
+			}
+			if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
+				return err
+			}
+			if controller.runtime.Config.RepoURL != "" {
+				if err := controller.runtime.CommitAndPush(fmt.Sprintf("Scale in node MachineDeployment to %d", targetReplicas)); err != nil {
+					return err
+				}
 			}
 		}
-		return &NodeScalingDeferredError{
-			Reason: fmt.Sprintf("waiting for regular pods to drain from reserved scaling nodes %s", strings.Join(reservedNodes, ", ")),
-		}
+
+		logging.LogInfo("[%s] Node scale-in requested (reason: %s). Reduced MachineDeployment replicas from %d to %d by removing %d excess unused scaling nodes while preserving %d prepared spares", request.Namespace, request.Reason, replicas, targetReplicas, excessUnused, preparedSpareCount)
+		return nil
 	}
 
-	replicas, err = controller.runtime.ReadMachineDeploymentReplicas()
+	usedCount := CountUsedInventoryNodes(inventory)
+	if usedCount == 0 {
+		logging.LogInfo(
+			"[%s] Node scale-in skipped (reason: %s). Prepared spare floor is already satisfied and there are no used scaling nodes left to drain",
+			request.Namespace,
+			request.Reason,
+		)
+		return nil
+	}
+
+	reservableUsedCount := usedCount
+	if controller.quotaAutoscalerClient != nil {
+		evaluation, err := controller.EvaluateScaleInCapacity()
+		if err != nil {
+			return err
+		}
+		if len(evaluation.RemovableNodes) == 0 {
+			logging.LogInfo(
+				"[%s] Node scale-in skipped (reason: %s). No additional used scaling nodes can be converted into prepared spares without violating managed quota capacity",
+				request.Namespace,
+				request.Reason,
+			)
+			return nil
+		}
+		reservableUsedCount = len(evaluation.RemovableNodes)
+	}
+
+	reservedNodes, err := controller.reserveScaleInCandidates(inventory, reservableUsedCount, request)
 	if err != nil {
 		return err
 	}
-
-	targetReplicas := replicas - int32(unusedCount)
-	if targetReplicas < minReplicas {
-		targetReplicas = minReplicas
-	}
-	if targetReplicas != replicas {
-		if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
-			return err
-		}
-		if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
-			return err
-		}
-		if controller.runtime.Config.RepoURL != "" {
-			if err := controller.runtime.CommitAndPush(fmt.Sprintf("Scale in node MachineDeployment to %d", targetReplicas)); err != nil {
-				return err
-			}
+	if len(reservedNodes) == 0 {
+		return &NodeScalingDeferredError{
+			Reason: "waiting for reserved scaling nodes to finish draining",
 		}
 	}
-
-	logging.LogInfo("[%s] Node scale-in requested (reason: %s). Reduced MachineDeployment replicas from %d to %d using %d unused scaling nodes", request.Namespace, request.Reason, replicas, targetReplicas, unusedCount)
-	return nil
+	return &NodeScalingDeferredError{
+		Reason: fmt.Sprintf("waiting for regular pods to drain from reserved scaling nodes %s", strings.Join(reservedNodes, ", ")),
+	}
 }
 
 func (controller *NodeScalingController) reserveScaleInCandidates(inventory *inventoryv1.NodeScalingInventory, limit int, request ScaleInRequest) ([]string, error) {

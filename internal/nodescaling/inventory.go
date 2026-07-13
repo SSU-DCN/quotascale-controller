@@ -333,3 +333,17 @@ func CountUnusedInventoryNodes(inventory *inventoryv1.NodeScalingInventory) int 
 	}
 	return count
 }
+
+func CountUsedInventoryNodes(inventory *inventoryv1.NodeScalingInventory) int {
+	if inventory == nil {
+		return 0
+	}
+
+	count := 0
+	for _, node := range inventory.Spec.Nodes {
+		if node.Used {
+			count++
+		}
+	}
+	return count
+}

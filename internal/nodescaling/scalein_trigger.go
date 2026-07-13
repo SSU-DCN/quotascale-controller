@@ -27,15 +27,6 @@ func (controller *NodeScalingController) EvaluateAutomaticScaleIn() error {
 	if controller.hasActiveScaleInWaiters() {
 		return nil
 	}
-	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
-	if err != nil {
-		return err
-	}
-	minReplicas := controller.minimumPreparedSpareCount()
-	if replicas <= minReplicas {
-		controller.resetScaleInTrigger()
-		return nil
-	}
 
 	evaluation, err := controller.EvaluateScaleInCapacity()
 	if err != nil {
@@ -84,13 +75,18 @@ func (controller *NodeScalingController) EvaluateScaleInCapacity() (*ScaleInCapa
 		return nil, err
 	}
 
-	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
-	if err != nil {
-		return nil, err
+	usedCount := CountUsedInventoryNodes(inventory)
+	if usedCount == 0 {
+		return &ScaleInCapacityEvaluation{
+			Eligible:              false,
+			ManagedLimits:         managedLimits,
+			CurrentWorkerCapacity: currentWorkerCapacity,
+			ProjectedCapacity:     currentWorkerCapacity,
+			RemovableNodes:        []string{},
+		}, nil
 	}
 
-	minReplicas := controller.minimumPreparedSpareCount()
-	candidates, err := FindHighestOrderUsedInventoryNodes(inventory, int(replicas-minReplicas))
+	candidates, err := FindHighestOrderUsedInventoryNodes(inventory, usedCount)
 	if err != nil {
 		return nil, err
 	}
