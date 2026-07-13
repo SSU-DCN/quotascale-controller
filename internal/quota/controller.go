@@ -44,6 +44,14 @@ type QuotaController struct {
 	scaleOutRequestHandler nodescaling.ScaleOutRequestHandler
 }
 
+type QuotaDeferredError struct {
+	Reason string
+}
+
+func (err *QuotaDeferredError) Error() string {
+	return err.Reason
+}
+
 // QuotaWatcher internally manages a list of QuotaAutoscalers and ResourceQuotas.
 type QuotaWatcher struct {
 	Scalers map[string]v14.QuotaAutoscaler
@@ -181,6 +189,11 @@ func (watcher *QuotaWatcher) UpdateNs(namespace string, readEvents bool) {
 		go func() {
 			err := watcher.UpdateQuotaIfRequired(quota, scaler, events)
 			if err != nil {
+				var deferredErr *QuotaDeferredError
+				if errors.As(err, &deferredErr) {
+					logging.LogInfo("[%s] Quota update deferred: %s", namespace, deferredErr.Error())
+					return
+				}
 				logging.LogError("[%s] Failed to update quota for: %s", namespace, err.Error())
 			}
 		}()
@@ -386,8 +399,8 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 					return handleErr
 				}
 
-				if recheckErr := EnsureScaleUpFitsCluster(watcher.Client, current, *desired); recheckErr != nil {
-					return fmt.Errorf("node scale-out completed but desired quota is still unavailable: %w", recheckErr)
+				return &QuotaDeferredError{
+					Reason: fmt.Sprintf("node scale-out requested; waiting for worker capacity before resizing quota: %s", err.Error()),
 				}
 			}
 			if watcher.ScaleOutRequestHandler == nil || desired.IsScaleDown(&quota) {

@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -157,7 +158,7 @@ func TestRegisterNamespacedEventKeepsNewEventsAfterWatcherStart(t *testing.T) {
 	}
 }
 
-func TestUpdateQuotaIfRequiredRechecksCapacityAfterScaleOut(t *testing.T) {
+func TestUpdateQuotaIfRequiredDefersQuotaResizeAfterScaleOutRequest(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		&corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
@@ -231,7 +232,7 @@ func TestUpdateQuotaIfRequiredRechecksCapacityAfterScaleOut(t *testing.T) {
 
 	err := watcher.UpdateQuotaIfRequired(quota, scaler, nil)
 	if err == nil {
-		t.Fatalf("expected capacity recheck error after scale-out request")
+		t.Fatalf("expected deferred result after scale-out request")
 	}
 	if !handler.called {
 		t.Fatalf("expected scale-out handler to be called")
@@ -245,7 +246,12 @@ func TestUpdateQuotaIfRequiredRechecksCapacityAfterScaleOut(t *testing.T) {
 	if handler.request.Desired.Cpu <= handler.request.Current.Cpu {
 		t.Fatalf("expected desired cpu to exceed current cpu, got current=%+v desired=%+v", handler.request.Current, handler.request.Desired)
 	}
-	if !strings.Contains(err.Error(), "node scale-out completed but desired quota is still unavailable") {
+
+	var deferredErr *QuotaDeferredError
+	if !errors.As(err, &deferredErr) {
+		t.Fatalf("expected deferred error type, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "node scale-out requested; waiting for worker capacity before resizing quota") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
