@@ -1413,33 +1413,51 @@ func TestNodeScalingControllerEvaluateScaleInCapacityAllowsPartialScalingNodeRem
 				},
 			},
 		},
-		&v12.ResourceQuota{
+		&v12.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "quota-a",
+				Name:      "app-a",
 				Namespace: "default",
 			},
-			Spec: v12.ResourceQuotaSpec{
-				Hard: v12.ResourceList{
-					v12.ResourceLimitsCPU:    resource.MustParse("5"),
-					v12.ResourceLimitsMemory: resource.MustParse("10Gi"),
+			Spec: v12.PodSpec{
+				NodeName: "worker-1",
+				Containers: []v12.Container{
+					{
+						Name: "main",
+						Resources: v12.ResourceRequirements{
+							Requests: v12.ResourceList{
+								v12.ResourceCPU:    resource.MustParse("3"),
+								v12.ResourceMemory: resource.MustParse("6Gi"),
+							},
+						},
+					},
 				},
 			},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
 		},
-	)
-	scalerClient := scalerfake.NewSimpleClientset(
-		&scalerv1.QuotaAutoscaler{
+		&v12.Pod{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "scaler-a",
+				Name:      "app-b",
 				Namespace: "default",
 			},
-			Spec: scalerv1.QuotaAutoscalerSpec{
-				ResourceQuota: "quota-a",
+			Spec: v12.PodSpec{
+				NodeName: "scaling-a",
+				Containers: []v12.Container{
+					{
+						Name: "main",
+						Resources: v12.ResourceRequirements{
+							Requests: v12.ResourceList{
+								v12.ResourceCPU:    resource.MustParse("2"),
+								v12.ResourceMemory: resource.MustParse("2Gi"),
+							},
+						},
+					},
+				},
 			},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
 		},
 	)
 
 	controller := NewNodeScalingController(nil, client, store, time.Minute)
-	controller.SetQuotaAutoscalerClient(scalerClient)
 	controller.runtime = &NodeScalingRuntime{
 		Config:  NodeScalingConfig{RepoFilePath: defaultNodeScalingFile},
 		RepoDir: t.TempDir(),
@@ -1455,6 +1473,62 @@ func TestNodeScalingControllerEvaluateScaleInCapacityAllowsPartialScalingNodeRem
 	}
 	if len(evaluation.RemovableNodes) != 1 || evaluation.RemovableNodes[0] != "scaling-b" {
 		t.Fatalf("expected only highest-order scaling-b to be removable first, got %#v", evaluation.RemovableNodes)
+	}
+}
+
+func TestNodeScalingControllerSchedulableWorkerNodeAvailableResourcesSubtractsRunningPodRequests(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("4"),
+					v12.ResourceMemory: resource.MustParse("8Gi"),
+				},
+			},
+		},
+		&v12.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-2"},
+			Status: v12.NodeStatus{
+				Allocatable: v12.ResourceList{
+					v12.ResourceCPU:    resource.MustParse("2"),
+					v12.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+		},
+		&v12.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "app-a", Namespace: "default"},
+			Spec: v12.PodSpec{
+				NodeName: "worker-1",
+				Containers: []v12.Container{
+					{
+						Name: "main",
+						Resources: v12.ResourceRequirements{
+							Requests: v12.ResourceList{
+								v12.ResourceCPU:    resource.MustParse("1500m"),
+								v12.ResourceMemory: resource.MustParse("1Gi"),
+							},
+						},
+					},
+				},
+			},
+			Status: v12.PodStatus{Phase: v12.PodRunning},
+		},
+	)
+
+	controller := NewNodeScalingController(nil, client, nil, time.Minute)
+	available, _, err := controller.SchedulableWorkerNodeAvailableResources()
+	if err != nil {
+		t.Fatalf("expected available resource calculation to succeed, got error: %v", err)
+	}
+	if available.Cpu != 4500 {
+		t.Fatalf("expected available cpu 4500m, got %dm", available.Cpu)
+	}
+	totalMemoryQuantity := resource.MustParse("12Gi")
+	requestedMemoryQuantity := resource.MustParse("1Gi")
+	expectedMemory := totalMemoryQuantity.ScaledValue(resource.Mega) - requestedMemoryQuantity.ScaledValue(resource.Mega)
+	if available.Memory != expectedMemory {
+		t.Fatalf("expected available memory %dM, got %dM", expectedMemory, available.Memory)
 	}
 }
 

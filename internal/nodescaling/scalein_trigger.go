@@ -13,11 +13,10 @@ import (
 )
 
 type ScaleInCapacityEvaluation struct {
-	Eligible              bool
-	ManagedLimits         resources.Resources
-	CurrentWorkerCapacity resources.Resources
-	ProjectedCapacity     resources.Resources
-	RemovableNodes        []string
+	Eligible               bool
+	CurrentWorkerAvailable resources.Resources
+	ProjectedAvailable     resources.Resources
+	RemovableNodes         []string
 }
 
 func (controller *NodeScalingController) EvaluateAutomaticScaleIn() error {
@@ -48,24 +47,17 @@ func (controller *NodeScalingController) EvaluateAutomaticScaleIn() error {
 	controller.resetScaleInTrigger()
 	return controller.HandleScaleInRequest(ScaleInRequest{
 		Reason: fmt.Sprintf(
-			"managed ResourceQuota limits cpu=%dm memory=%dM still fit after removing scaling nodes %v, leaving worker capacity cpu=%dm memory=%dM for %s",
-			evaluation.ManagedLimits.Cpu,
-			evaluation.ManagedLimits.Memory,
+			"worker available resources still stay non-negative after removing scaling nodes %v, leaving available cpu=%dm memory=%dM for %s",
 			evaluation.RemovableNodes,
-			evaluation.ProjectedCapacity.Cpu,
-			evaluation.ProjectedCapacity.Memory,
+			evaluation.ProjectedAvailable.Cpu,
+			evaluation.ProjectedAvailable.Memory,
 			controller.scaleInTriggerDelay,
 		),
 	})
 }
 
 func (controller *NodeScalingController) EvaluateScaleInCapacity() (*ScaleInCapacityEvaluation, error) {
-	managedLimits, err := controller.ManagedQuotaLimitTotals()
-	if err != nil {
-		return nil, err
-	}
-
-	currentWorkerCapacity, capacityByNode, err := controller.SchedulableWorkerNodeCapacity()
+	currentWorkerAvailable, capacityByNode, err := controller.SchedulableWorkerNodeAvailableResources()
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +70,10 @@ func (controller *NodeScalingController) EvaluateScaleInCapacity() (*ScaleInCapa
 	usedCount := CountUsedInventoryNodes(inventory)
 	if usedCount == 0 {
 		return &ScaleInCapacityEvaluation{
-			Eligible:              false,
-			ManagedLimits:         managedLimits,
-			CurrentWorkerCapacity: currentWorkerCapacity,
-			ProjectedCapacity:     currentWorkerCapacity,
-			RemovableNodes:        []string{},
+			Eligible:               false,
+			CurrentWorkerAvailable: currentWorkerAvailable,
+			ProjectedAvailable:     currentWorkerAvailable,
+			RemovableNodes:         []string{},
 		}, nil
 	}
 
@@ -91,7 +82,7 @@ func (controller *NodeScalingController) EvaluateScaleInCapacity() (*ScaleInCapa
 		return nil, err
 	}
 
-	projectedCapacity := currentWorkerCapacity
+	projectedAvailable := currentWorkerAvailable
 	removableNodes := make([]string, 0, len(candidates))
 	for _, node := range candidates {
 		nodeCapacity, exists := capacityByNode[node.Name]
@@ -99,30 +90,22 @@ func (controller *NodeScalingController) EvaluateScaleInCapacity() (*ScaleInCapa
 			continue
 		}
 
-		nextCapacity := projectedCapacity
-		nextCapacity.Cpu -= nodeCapacity.Cpu
-		nextCapacity.Memory -= nodeCapacity.Memory
-		if nextCapacity.Cpu < 0 {
-			nextCapacity.Cpu = 0
-		}
-		if nextCapacity.Memory < 0 {
-			nextCapacity.Memory = 0
-		}
-
-		if managedLimits.Cpu > nextCapacity.Cpu || managedLimits.Memory > nextCapacity.Memory {
+		nextAvailable := projectedAvailable
+		nextAvailable.Cpu -= nodeCapacity.Cpu
+		nextAvailable.Memory -= nodeCapacity.Memory
+		if nextAvailable.Cpu < 0 || nextAvailable.Memory < 0 {
 			break
 		}
 
-		projectedCapacity = nextCapacity
+		projectedAvailable = nextAvailable
 		removableNodes = append(removableNodes, node.Name)
 	}
 
 	return &ScaleInCapacityEvaluation{
-		Eligible:              len(removableNodes) > 0,
-		ManagedLimits:         managedLimits,
-		CurrentWorkerCapacity: currentWorkerCapacity,
-		ProjectedCapacity:     projectedCapacity,
-		RemovableNodes:        removableNodes,
+		Eligible:               len(removableNodes) > 0,
+		CurrentWorkerAvailable: currentWorkerAvailable,
+		ProjectedAvailable:     projectedAvailable,
+		RemovableNodes:         removableNodes,
 	}, nil
 }
 
@@ -159,6 +142,37 @@ func (controller *NodeScalingController) ManagedQuotaLimitTotals() (resources.Re
 func (controller *NodeScalingController) NonScalingWorkerNodeCapacity() (resources.Resources, error) {
 	total, _, err := controller.SchedulableWorkerNodeCapacity()
 	return total, err
+}
+
+func (controller *NodeScalingController) SchedulableWorkerNodeAvailableResources() (resources.Resources, map[string]resources.Resources, error) {
+	totalCapacity, capacityByNode, err := controller.SchedulableWorkerNodeCapacity()
+	if err != nil {
+		return resources.Resources{}, nil, err
+	}
+
+	pods, err := controller.client.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return resources.Resources{}, nil, err
+	}
+
+	available := totalCapacity
+	for _, pod := range pods.Items {
+		if _, tracked := capacityByNode[pod.Spec.NodeName]; !tracked || isTerminalPodForAvailability(pod) {
+			continue
+		}
+
+		requested := podRequestedResourcesForAvailability(pod)
+		available.Cpu -= requested.Cpu
+		available.Memory -= requested.Memory
+	}
+
+	if available.Cpu < 0 {
+		available.Cpu = 0
+	}
+	if available.Memory < 0 {
+		available.Memory = 0
+	}
+	return available, capacityByNode, nil
 }
 
 func (controller *NodeScalingController) SchedulableWorkerNodeCapacity() (resources.Resources, map[string]resources.Resources, error) {
@@ -214,4 +228,30 @@ func nodeHasScalingTaint(node v12.Node) bool {
 		}
 	}
 	return false
+}
+
+func isTerminalPodForAvailability(pod v12.Pod) bool {
+	return pod.Status.Phase == v12.PodSucceeded || pod.Status.Phase == v12.PodFailed
+}
+
+func podRequestedResourcesForAvailability(pod v12.Pod) resources.Resources {
+	sum := resources.Resources{}
+	for _, container := range pod.Spec.Containers {
+		sum.Cpu += container.Resources.Requests.Cpu().ScaledValue(resource.Milli)
+		sum.Memory += container.Resources.Requests.Memory().ScaledValue(resource.Mega)
+	}
+
+	initMax := resources.Resources{}
+	for _, container := range pod.Spec.InitContainers {
+		cpu := container.Resources.Requests.Cpu().ScaledValue(resource.Milli)
+		memory := container.Resources.Requests.Memory().ScaledValue(resource.Mega)
+		if cpu > initMax.Cpu {
+			initMax.Cpu = cpu
+		}
+		if memory > initMax.Memory {
+			initMax.Memory = memory
+		}
+	}
+	sum.Max(&initMax)
+	return sum
 }

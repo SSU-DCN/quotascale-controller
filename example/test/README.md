@@ -158,23 +158,32 @@ goal than lightweight health/demo services.
 ## Traffic Provenance
 
 The generated traces in this folder are not arbitrary ramps.
+The concrete timestamps and normalized peaks below were rechecked against the
+current `locust/worldcup_a.summary.txt` and `locust/worldcup_b.summary.txt`
+files in this folder.
 
 Namespace A trace:
 
 - source file: `wc_day46_1.gz`
-- dataset interpretation: opening-day traffic, from the first match day of the tournament
+- dataset interpretation: opening-day traffic
+  This is an interpretation based on the source file date (`1998-06-10`), which
+  is the tournament opening day, not a label embedded in the ITA dataset itself.
 - official source date: June 10, 1998
 - selected local-time window: `1998-06-10T08:12:02+02:00` to `1998-06-10T08:42:01+02:00`
 - normalized peak: `9 RPS`
+- smoothing window: `11s`
 - output file: `locust/worldcup_a.csv`
 
 Namespace B trace:
 
 - source file: `wc_day66_1.gz`
-- dataset interpretation: knockout-stage traffic, from the round-of-16 period of the tournament
+- dataset interpretation: knockout-stage traffic
+  This is an interpretation based on the source file date (`1998-06-30`), which
+  falls in the round-of-16 period, not a label embedded in the ITA dataset itself.
 - official source date: June 30, 1998
 - selected local-time window: `1998-06-30T00:00:06+02:00` to `1998-06-30T00:30:05+02:00`
 - normalized peak: `12 RPS`
+- smoothing window: `11s`
 - output file: `locust/worldcup_b.csv`
 
 The normalization keeps the original burst shape but scales the absolute
@@ -260,6 +269,11 @@ Each Locust user continuously issues CPU-heavy HTTP requests with no think time:
 `USER_SCALE` then scales the replay intensity up or down while keeping the
 World Cup-derived shape.
 
+Current defaults used by the checked-in replay code:
+
+- `locust/locustfile.py`: `USER_SCALE=12.0`
+- `locust/run_dual_replay.sh`: `A_USER_SCALE=12.0`, `B_USER_SCALE=12.0`
+
 This means:
 
 - the curve shape comes from real data
@@ -297,6 +311,13 @@ What the builder does:
 - finds the busiest `window-seconds` interval in the source file
 - smooths the series with a short moving average
 - scales the peak to the requested value
+
+For the checked-in traces today, that means:
+
+- both A and B use the busiest `1800s` window from their source file
+- both traces use `11s` smoothing
+- A is normalized to `9 RPS`
+- B is normalized to `12 RPS`
 
 ## Apply Order
 
