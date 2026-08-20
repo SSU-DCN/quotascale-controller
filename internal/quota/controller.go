@@ -418,9 +418,14 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 					return handleErr
 				}
 
-				return &QuotaDeferredError{
-					Reason: fmt.Sprintf("node scale-out requested; waiting for worker capacity before resizing quota: %s", err.Error()),
+				if capacityErr := EnsurePodDemandFitsCluster(watcher.Client, pendingPodRequests); capacityErr != nil {
+					return &QuotaDeferredError{
+						Reason: fmt.Sprintf("node scale-out requested; waiting for worker capacity before resizing quota: %s", capacityErr.Error()),
+					}
 				}
+
+				watcher.clearPendingScaleOut(quota.Namespace)
+				logging.LogInfo("[%s] Worker capacity became available after node scale-out; applying desired quota immediately", quota.Namespace)
 			}
 			if watcher.ScaleOutRequestHandler == nil || desired.IsScaleDown(&quota) {
 				return err

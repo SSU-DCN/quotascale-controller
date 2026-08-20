@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
+	"github.com/SSU-DCN/quotascale-controller/internal/resize"
 	scalerv1 "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/apis/quotaautoscaler/v1"
 	scalerfake "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/client/clientset/versioned/fake"
 	appsv1 "k8s.io/api/apps/v1"
@@ -19,9 +20,10 @@ import (
 )
 
 type captureScaleOutRequestHandler struct {
-	called  bool
-	count   int
-	request nodescaling.ScaleOutRequest
+	called   bool
+	count    int
+	request  nodescaling.ScaleOutRequest
+	onHandle func()
 }
 
 func TestNamespaceNeedsScaleOutUsesCPULimitUsageForFailedCreates(t *testing.T) {
@@ -81,7 +83,35 @@ func (handler *captureScaleOutRequestHandler) HandleScaleOutRequest(request node
 	handler.called = true
 	handler.count++
 	handler.request = request
+	if handler.onHandle != nil {
+		handler.onHandle()
+	}
 	return nil
+}
+
+func failedCreateReplicaSet() *appsv1.ReplicaSet {
+	replicas := int32(2)
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota-rs", Namespace: "default"},
+		Spec: appsv1.ReplicaSetSpec{
+			Replicas: &replicas,
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+				},
+			}}}},
+		},
+	}
+}
+
+func failedCreateEvents() []corev1.Event {
+	return []corev1.Event{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		InvolvedObject: corev1.ObjectReference{
+			Kind: "ReplicaSet", Namespace: "default", Name: "quota-rs",
+		},
+	}}
 }
 
 func TestRegisterNamespacedEventMarksQuotaDeniedEventsAsImmediate(t *testing.T) {
@@ -225,6 +255,7 @@ func TestUpdateQuotaIfRequiredDefersQuotaResizeAfterScaleOutRequest(t *testing.T
 				},
 			},
 		},
+		failedCreateReplicaSet(),
 	)
 
 	handler := &captureScaleOutRequestHandler{}
@@ -286,7 +317,7 @@ func TestUpdateQuotaIfRequiredDefersQuotaResizeAfterScaleOutRequest(t *testing.T
 		},
 	}
 
-	err := watcher.UpdateQuotaIfRequired(quota, scaler, nil)
+	err := watcher.UpdateQuotaIfRequired(quota, scaler, failedCreateEvents())
 	if err == nil {
 		t.Fatalf("expected deferred result after scale-out request")
 	}
@@ -312,6 +343,73 @@ func TestUpdateQuotaIfRequiredDefersQuotaResizeAfterScaleOutRequest(t *testing.T
 	}
 }
 
+func TestUpdateQuotaIfRequiredResizesImmediatelyWhenScaleOutMakesCapacityAvailable(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"),
+			}},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "spare-1"},
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+				Key: "node-role.kubernetes.io/scaling", Effect: corev1.TaintEffectNoSchedule,
+			}}},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("4"),
+			}},
+		},
+		failedCreateReplicaSet(),
+	)
+	handler := &captureScaleOutRequestHandler{onHandle: func() {
+		node, err := client.CoreV1().Nodes().Get(context.TODO(), "spare-1", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("expected spare node: %v", err)
+		}
+		node.Spec.Taints = nil
+		if _, err := client.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("expected spare activation: %v", err)
+		}
+	}}
+	watcher := &QuotaWatcher{Client: client, ScaleOutRequestHandler: handler}
+	quota := corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "default"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceCPU:             resource.MustParse("1"),
+			corev1.ResourceMemory:          resource.MustParse("1Gi"),
+			corev1.ResourceRequestsStorage: resource.MustParse("0"),
+		}},
+		Status: corev1.ResourceQuotaStatus{
+			Hard: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			Used: corev1.ResourceList{corev1.ResourceLimitsCPU: resource.MustParse("900m")},
+		},
+	}
+	scaler := scalerv1.QuotaAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: scalerv1.QuotaAutoscalerSpec{
+			ResourceQuota: "quota", MaxCpu: "4", MaxMemory: "8Gi",
+		},
+	}
+	resizeEvents := make(chan resize.NamespaceResizeEvent, 1)
+	go func() { resizeEvents <- <-resize.ResizeNsChan }()
+
+	if err := watcher.UpdateQuotaIfRequired(quota, scaler, failedCreateEvents()); err != nil {
+		t.Fatalf("expected immediate quota resize after spare activation, got: %v", err)
+	}
+	if !handler.called {
+		t.Fatal("expected scale-out handler to activate the spare")
+	}
+	select {
+	case event := <-resizeEvents:
+		if event.New.Cpu != 2900 {
+			t.Fatalf("expected immediate desired quota 2900m, got %dm", event.New.Cpu)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected immediate quota resize event")
+	}
+}
+
 func TestUpdateQuotaIfRequiredDeduplicatesPendingScaleOutRequests(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		&corev1.Node{
@@ -323,6 +421,7 @@ func TestUpdateQuotaIfRequiredDeduplicatesPendingScaleOutRequests(t *testing.T) 
 				},
 			},
 		},
+		failedCreateReplicaSet(),
 	)
 
 	handler := &captureScaleOutRequestHandler{}
@@ -382,11 +481,11 @@ func TestUpdateQuotaIfRequiredDeduplicatesPendingScaleOutRequests(t *testing.T) 
 		},
 	}
 
-	err := watcher.UpdateQuotaIfRequired(quota, scaler, nil)
+	err := watcher.UpdateQuotaIfRequired(quota, scaler, failedCreateEvents())
 	if err == nil {
 		t.Fatalf("expected deferred result after first scale-out request")
 	}
-	err = watcher.UpdateQuotaIfRequired(quota, scaler, nil)
+	err = watcher.UpdateQuotaIfRequired(quota, scaler, failedCreateEvents())
 	if err == nil {
 		t.Fatalf("expected deferred result while scale-out is still pending")
 	}
