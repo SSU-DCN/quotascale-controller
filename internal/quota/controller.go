@@ -60,11 +60,13 @@ type QuotaWatcher struct {
 	Events  map[string][]v12.Event
 	Started time.Time
 
-	Client                 kubernetes.Interface
-	QuotaAutoscalerClient  scalerclient.Interface
-	ScaleOutRequestHandler nodescaling.ScaleOutRequestHandler
-	pendingScaleOut        map[string]struct{}
-	pendingScaleOutMu      sync.Mutex
+	Client                   kubernetes.Interface
+	QuotaAutoscalerClient    scalerclient.Interface
+	ScaleOutRequestHandler   nodescaling.ScaleOutRequestHandler
+	pendingScaleOut          map[string]struct{}
+	pendingScaleOutMu        sync.Mutex
+	postScaleOutPollInterval time.Duration
+	postScaleOutPollTimeout  time.Duration
 }
 
 func NewQuotaController(client kubernetes.Interface, quotaAutoscalerClient scalerclient.Interface, quotaCheckInterval time.Duration, scaleOutRequestHandler nodescaling.ScaleOutRequestHandler) *QuotaController {
@@ -418,7 +420,7 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 					return handleErr
 				}
 
-				if capacityErr := EnsurePodDemandFitsCluster(watcher.Client, pendingPodRequests); capacityErr != nil {
+				if capacityErr := watcher.waitForWorkerCapacity(pendingPodRequests); capacityErr != nil {
 					return &QuotaDeferredError{
 						Reason: fmt.Sprintf("node scale-out requested; waiting for worker capacity before resizing quota: %s", capacityErr.Error()),
 					}
@@ -437,6 +439,30 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	}
 
 	return nil
+}
+
+func (watcher *QuotaWatcher) waitForWorkerCapacity(demand resources.Resources) error {
+	interval := watcher.postScaleOutPollInterval
+	if interval <= 0 {
+		interval = 250 * time.Millisecond
+	}
+	timeout := watcher.postScaleOutPollTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	deadline := time.Now().Add(timeout)
+	var capacityErr error
+	for {
+		capacityErr = EnsurePodDemandFitsCluster(watcher.Client, demand)
+		if capacityErr == nil {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return capacityErr
+		}
+		time.Sleep(interval)
+	}
 }
 
 func (watcher *QuotaWatcher) beginPendingScaleOut(namespace string) bool {

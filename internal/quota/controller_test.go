@@ -260,8 +260,10 @@ func TestUpdateQuotaIfRequiredDefersQuotaResizeAfterScaleOutRequest(t *testing.T
 
 	handler := &captureScaleOutRequestHandler{}
 	watcher := &QuotaWatcher{
-		Client:                 client,
-		ScaleOutRequestHandler: handler,
+		Client:                   client,
+		ScaleOutRequestHandler:   handler,
+		postScaleOutPollInterval: time.Millisecond,
+		postScaleOutPollTimeout:  2 * time.Millisecond,
 	}
 
 	quota := corev1.ResourceQuota{
@@ -362,17 +364,23 @@ func TestUpdateQuotaIfRequiredResizesImmediatelyWhenScaleOutMakesCapacityAvailab
 		},
 		failedCreateReplicaSet(),
 	)
+	activationErr := make(chan error, 1)
 	handler := &captureScaleOutRequestHandler{onHandle: func() {
-		node, err := client.CoreV1().Nodes().Get(context.TODO(), "spare-1", metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("expected spare node: %v", err)
-		}
-		node.Spec.Taints = nil
-		if _, err := client.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{}); err != nil {
-			t.Fatalf("expected spare activation: %v", err)
-		}
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			node, err := client.CoreV1().Nodes().Get(context.TODO(), "spare-1", metav1.GetOptions{})
+			if err == nil {
+				node.Spec.Taints = nil
+				_, err = client.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+			}
+			activationErr <- err
+		}()
 	}}
-	watcher := &QuotaWatcher{Client: client, ScaleOutRequestHandler: handler}
+	watcher := &QuotaWatcher{
+		Client: client, ScaleOutRequestHandler: handler,
+		postScaleOutPollInterval: 5 * time.Millisecond,
+		postScaleOutPollTimeout:  time.Second,
+	}
 	quota := corev1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "default"},
 		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
@@ -399,6 +407,9 @@ func TestUpdateQuotaIfRequiredResizesImmediatelyWhenScaleOutMakesCapacityAvailab
 	}
 	if !handler.called {
 		t.Fatal("expected scale-out handler to activate the spare")
+	}
+	if err := <-activationErr; err != nil {
+		t.Fatalf("expected delayed spare activation: %v", err)
 	}
 	select {
 	case event := <-resizeEvents:
