@@ -79,6 +79,7 @@ func TestEnsureScaleUpFitsClusterRejectsUnavailableCapacity(t *testing.T) {
 	err := EnsureScaleUpFitsCluster(
 		client,
 		resources.Resources{Cpu: 2500, Memory: 2048},
+		resources.Resources{Cpu: 1000, Memory: 1024},
 		resources.Resources{Cpu: 6000, Memory: 5120},
 	)
 	if err == nil {
@@ -86,7 +87,7 @@ func TestEnsureScaleUpFitsClusterRejectsUnavailableCapacity(t *testing.T) {
 	}
 }
 
-func TestEnsureScaleUpFitsClusterAllowsDesiredTotalWhenIncrementFits(t *testing.T) {
+func TestEnsureScaleUpFitsClusterRejectsDesiredTotalWhenOnlyQuotaIncrementFits(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		node("worker-1", "4", "4Gi", nil),
 		pod("running", "worker-1", corev1.PodRunning, "500m", "512Mi"),
@@ -95,10 +96,28 @@ func TestEnsureScaleUpFitsClusterAllowsDesiredTotalWhenIncrementFits(t *testing.
 	err := EnsureScaleUpFitsCluster(
 		client,
 		resources.Resources{Cpu: 4000, Memory: 2048},
+		resources.Resources{Cpu: 500, Memory: 512},
 		resources.Resources{Cpu: 5000, Memory: 3072},
 	)
+	if err == nil {
+		t.Fatal("expected scale up to be rejected when desired quota is not backed by worker capacity")
+	}
+}
+
+func TestEnsureScaleUpFitsClusterAllowsDesiredQuotaBackedByUsageAndAvailableCapacity(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		node("worker-1", "8", "8Gi", nil),
+		pod("running", "worker-1", corev1.PodRunning, "2000m", "2Gi"),
+	)
+
+	err := EnsureScaleUpFitsCluster(
+		client,
+		resources.Resources{Cpu: 4000, Memory: 4096},
+		resources.Resources{Cpu: 2000, Memory: 2048},
+		resources.Resources{Cpu: 7000, Memory: 7168},
+	)
 	if err != nil {
-		t.Fatalf("expected scale up to succeed when only the incremental quota increase must fit, got error: %v", err)
+		t.Fatalf("expected desired quota to fit usage plus available worker capacity, got error: %v", err)
 	}
 }
 
@@ -108,6 +127,7 @@ func TestEnsureScaleUpFitsClusterAllowsScaleDownWithoutCapacityCheck(t *testing.
 	err := EnsureScaleUpFitsCluster(
 		client,
 		resources.Resources{Cpu: 4000, Memory: 4096},
+		resources.Resources{Cpu: 1000, Memory: 1024},
 		resources.Resources{Cpu: 2000, Memory: 2048},
 	)
 	if err != nil {

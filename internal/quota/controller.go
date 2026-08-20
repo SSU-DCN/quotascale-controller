@@ -399,7 +399,8 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	logging.LogInfo("[%s] Calculated desired resources (%+v -> %+v) for namespace %s\n", quota.Namespace, current, desired, scaler.Namespace)
 	desired.ForceNoScaleDownWhenScaleUp(&quota)
 	if desired.DiffersFrom(&quota) {
-		if err := EnsureScaleUpFitsCluster(watcher.Client, current, *desired); err != nil {
+		used := ResourceQuotaUsedRequests(&quota)
+		if err := EnsureScaleUpFitsCluster(watcher.Client, current, used, *desired); err != nil {
 			if watcher.ScaleOutRequestHandler != nil && !desired.IsScaleDown(&quota) {
 				if !watcher.beginPendingScaleOut(quota.Namespace) {
 					return &QuotaDeferredError{
@@ -499,5 +500,12 @@ func (watcher *QuotaWatcher) namespaceNeedsScaleOut(quota v12.ResourceQuota, sca
 		Memory:  quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
 		Storage: storage.ScaledValue(resource.Giga),
 	}
-	return EnsureScaleUpFitsCluster(watcher.Client, current, *desired) != nil
+	return EnsureScaleUpFitsCluster(watcher.Client, current, ResourceQuotaUsedRequests(&quota), *desired) != nil
+}
+
+func ResourceQuotaUsedRequests(quota *v12.ResourceQuota) resources.Resources {
+	return resources.Resources{
+		Cpu:    quota.Status.Used.Cpu().ScaledValue(resource.Milli),
+		Memory: quota.Status.Used.Memory().ScaledValue(resource.Mega),
+	}
 }
