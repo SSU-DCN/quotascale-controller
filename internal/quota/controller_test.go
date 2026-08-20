@@ -413,6 +413,9 @@ func TestUpdateQuotaIfRequiredResizesImmediatelyWhenScaleOutMakesCapacityAvailab
 	}
 	select {
 	case event := <-resizeEvents:
+		if !event.Immediate {
+			t.Fatal("expected quota-denied resize to bypass the update interval")
+		}
 		if event.New.Cpu != 2900 {
 			t.Fatalf("expected immediate desired quota 2900m, got %dm", event.New.Cpu)
 		}

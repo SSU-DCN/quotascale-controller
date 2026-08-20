@@ -27,6 +27,7 @@ type NamespaceResizeEvent struct {
 	ResourceQuota string
 	Old           resources.Resources
 	New           resources.Resources
+	Immediate     bool
 }
 
 type ResizeResult struct {
@@ -104,7 +105,7 @@ func RunEventHandler(updateInterval time.Duration) { // Blocks, forever
 	cache := map[string]ResizeCache{}
 
 	resize := func(event NamespaceResizeEvent) bool {
-		if previous, ok := cache[event.Namespace]; ok {
+		if previous, ok := cache[event.Namespace]; ok && !event.Immediate {
 			if previous.Timestamp.Add(updateInterval).After(time.Now()) {
 				logging.LogInfo("[%s] We updated this object recently (%v). Ignoring resize event until update interval %s has elapsed: %v", event.Namespace, previous, updateInterval, event)
 				return false
@@ -118,8 +119,12 @@ func RunEventHandler(updateInterval time.Duration) { // Blocks, forever
 		select {
 		case event := <-ResizeNsChan:
 			if inProgress[event.Namespace] {
-				// Resize API is already handling this namespace, keep event (newest) to execute in the future
-				pending[event.Namespace] = event
+				// Never let a periodic resize arriving concurrently replace a quota-denied
+				// resize. The latter must run as soon as the in-flight request completes.
+				previous, exists := pending[event.Namespace]
+				if event.Immediate || !exists || !previous.Immediate {
+					pending[event.Namespace] = event
+				}
 			} else {
 				// Resize API was not handling this namespace
 				if resize(event) {
@@ -145,7 +150,11 @@ func RunEventHandler(updateInterval time.Duration) { // Blocks, forever
 
 func InvokeResizeApiAsync(namespace, resourcequota string, old, new resources.Resources) {
 	// Storage scaling is not yet supported, old and new are always the same
-	ResizeNsChan <- NamespaceResizeEvent{namespace, resourcequota, old, new}
+	ResizeNsChan <- NamespaceResizeEvent{Namespace: namespace, ResourceQuota: resourcequota, Old: old, New: new}
+}
+
+func InvokeImmediateResizeApiAsync(namespace, resourcequota string, old, new resources.Resources) {
+	ResizeNsChan <- NamespaceResizeEvent{Namespace: namespace, ResourceQuota: resourcequota, Old: old, New: new, Immediate: true}
 }
 
 // TODO: this is left as an example as a resize endpoint, this code is not used

@@ -434,8 +434,13 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 			}
 		}
 
-		logging.LogDebug("[%s] InvokeResizeApiAsync", quota.Namespace)
-		resize.InvokeResizeApiAsync(quota.Namespace, scaler.Spec.ResourceQuota, current, *desired)
+		if !pendingPodRequests.IsEmpty() {
+			logging.LogInfo("[%s] Invoking immediate quota resize for quota-denied pod demand", quota.Namespace)
+			resize.InvokeImmediateResizeApiAsync(quota.Namespace, scaler.Spec.ResourceQuota, current, *desired)
+		} else {
+			logging.LogDebug("[%s] InvokeResizeApiAsync", quota.Namespace)
+			resize.InvokeResizeApiAsync(quota.Namespace, scaler.Spec.ResourceQuota, current, *desired)
+		}
 	}
 
 	return nil
