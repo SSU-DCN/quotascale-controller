@@ -9,13 +9,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/SSU-DCN/quotascale-controller/pkg/logging"
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/SSU-DCN/quotascale-controller/pkg/logging"
 	"gopkg.in/yaml.v2"
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -251,6 +251,10 @@ func (runtime *NodeScalingRuntime) CommitAndPush(message string) error {
 	if err != nil {
 		return err
 	}
+	previousHead, err := repo.Head()
+	if err != nil {
+		return err
+	}
 
 	worktree, err := repo.Worktree()
 	if err != nil {
@@ -282,7 +286,14 @@ func (runtime *NodeScalingRuntime) CommitAndPush(message string) error {
 	if err := repo.Push(&git.PushOptions{
 		Auth: runtime.auth(),
 	}); err != nil {
-		return err
+		resetErr := worktree.Reset(&git.ResetOptions{
+			Commit: previousHead.Hash(),
+			Mode:   git.HardReset,
+		})
+		if resetErr != nil {
+			return fmt.Errorf("push failed: %w; restoring local repository to %s also failed: %v", err, previousHead.Hash(), resetErr)
+		}
+		return fmt.Errorf("push failed; restored local repository to %s: %w", previousHead.Hash(), err)
 	}
 	logging.LogInfo(
 		"Pushed node scaling manifest change for %s to %s on branch %s",

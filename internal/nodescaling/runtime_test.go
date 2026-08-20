@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -242,6 +243,57 @@ spec:
 		if !contains(content, expected) {
 			t.Fatalf("expected updated manifest to preserve 2-space indentation pattern %q, got:\n%s", expected, content)
 		}
+	}
+}
+
+func TestCommitAndPushRestoresLocalRepositoryWhenPushFails(t *testing.T) {
+	repoDir := t.TempDir()
+	repo := initGitRepo(t, repoDir)
+	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(2))
+	commitFile(t, repo, defaultNodeScalingFile, "initial commit")
+	checkoutBranch(t, repo, defaultNodeScalingBranch)
+
+	previousHead, err := repo.Head()
+	if err != nil {
+		t.Fatalf("expected initial head, got error: %v", err)
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{"http://127.0.0.1:1/unreachable.git"},
+	}); err != nil {
+		t.Fatalf("expected remote creation to succeed, got error: %v", err)
+	}
+
+	runtime := &NodeScalingRuntime{
+		Config: NodeScalingConfig{
+			RepoURL:      "http://127.0.0.1:1/unreachable.git",
+			RepoBranch:   defaultNodeScalingBranch,
+			RepoFilePath: defaultNodeScalingFile,
+			Username:     "user",
+			Password:     "pass",
+		},
+		RepoDir: repoDir,
+	}
+	if err := runtime.WriteMachineDeploymentReplicas(3); err != nil {
+		t.Fatalf("expected replica update to succeed, got error: %v", err)
+	}
+	if err := runtime.CommitAndPush("scale to 3"); err == nil {
+		t.Fatal("expected push to fail")
+	}
+
+	restoredHead, err := repo.Head()
+	if err != nil {
+		t.Fatalf("expected restored head, got error: %v", err)
+	}
+	if restoredHead.Hash() != previousHead.Hash() {
+		t.Fatalf("expected head to be restored to %s, got %s", previousHead.Hash(), restoredHead.Hash())
+	}
+	replicas, err := runtime.ReadMachineDeploymentReplicas()
+	if err != nil {
+		t.Fatalf("expected restored manifest to be readable, got error: %v", err)
+	}
+	if replicas != 2 {
+		t.Fatalf("expected replicas to be restored to 2, got %d", replicas)
 	}
 }
 

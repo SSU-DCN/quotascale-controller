@@ -315,13 +315,13 @@ func (controller *NodeScalingController) ReconcileScaleOut(request ScaleOutReque
 		if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
 			return err
 		}
-		if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
-			return err
-		}
 		if controller.runtime.Config.RepoURL != "" {
 			if err := controller.runtime.CommitAndPush(fmt.Sprintf("Scale up node MachineDeployment to %d", targetReplicas)); err != nil {
 				return err
 			}
+		}
+		if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
+			return err
 		}
 	}
 
@@ -382,13 +382,13 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 			if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
 				return err
 			}
-			if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
-				return err
-			}
 			if controller.runtime.Config.RepoURL != "" {
 				if err := controller.runtime.CommitAndPush(fmt.Sprintf("Scale in node MachineDeployment to %d", targetReplicas)); err != nil {
 					return err
 				}
+			}
+			if err := controller.inventoryStore.UpdateMachineDeploymentReplicas(targetReplicas); err != nil {
+				return err
 			}
 		}
 
