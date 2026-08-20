@@ -101,6 +101,23 @@ func TestActivatePolicyUsesCPULimitsWhenHigherThanRequests(t *testing.T) {
 	}
 }
 
+func TestValidateQuotaScalerPreservesConfiguredMaximumsAboveDefaults(t *testing.T) {
+	scaler := ValidateQuotaScaler(&scalerv1.QuotaAutoscaler{
+		Spec: scalerv1.QuotaAutoscalerSpec{
+			MaxCpu:    "50",
+			MaxMemory: "200Gi",
+		},
+	})
+
+	if scaler.MaxCpu != 50000 {
+		t.Fatalf("expected configured max CPU 50000m, got %dm", scaler.MaxCpu)
+	}
+	expectedMemory := resource.MustParse("200Gi")
+	if scaler.MaxMemory != expectedMemory.ScaledValue(resource.Mega) {
+		t.Fatalf("expected configured max memory 200Gi, got %dM", scaler.MaxMemory)
+	}
+}
+
 func resourceQuotaWithCPU(hard, used string) *corev1.ResourceQuota {
 	return &corev1.ResourceQuota{
 		Spec: corev1.ResourceQuotaSpec{

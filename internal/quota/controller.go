@@ -387,7 +387,6 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	storage := quota.Spec.Hard["requests.storage"]
 
 	// Make sure desired quota is within bounds
-	validatedScaler.ForceLimitToDefaultMax()
 	desired.Max(&resources.Resources{Cpu: validatedScaler.MinCpu, Memory: validatedScaler.MinMemory})
 	desired.Limit(&resources.Resources{Cpu: validatedScaler.MaxCpu, Memory: validatedScaler.MaxMemory})
 	desired.Storage = storage.ScaledValue(resource.Giga)
@@ -490,7 +489,6 @@ func (watcher *QuotaWatcher) namespaceNeedsScaleOut(quota v12.ResourceQuota, sca
 	}
 
 	storage := quota.Spec.Hard["requests.storage"]
-	validatedScaler.ForceLimitToDefaultMax()
 	desired.Max(&resources.Resources{Cpu: validatedScaler.MinCpu, Memory: validatedScaler.MinMemory})
 	desired.Limit(&resources.Resources{Cpu: validatedScaler.MaxCpu, Memory: validatedScaler.MaxMemory})
 	desired.Storage = storage.ScaledValue(resource.Giga)

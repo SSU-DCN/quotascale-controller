@@ -74,18 +74,6 @@ func ParseQuantityWithDefault(value string, scale resource.Scale, def int64) int
 	return parsedValue.ScaledValue(scale)
 }
 
-func (scaler *ValidatedQuotaScaler) ForceLimitToDefaultMax() {
-	// Get the default maximum values, these are the max allowed
-	defaultScaler := ValidateQuotaScaler(&v1.QuotaAutoscaler{})
-
-	if scaler.MaxMemory > defaultScaler.MaxMemory {
-		scaler.MaxMemory = defaultScaler.MaxMemory
-	}
-	if scaler.MaxCpu > defaultScaler.MaxCpu {
-		scaler.MaxCpu = defaultScaler.MaxCpu
-	}
-}
-
 // ToActivePolicy converts a QuotaScalePolicy to an ActivePolicy given the scaleUp type and ResourceQuota values.
 func (scaler *ValidatedQuotaScaler) ToActivePolicy(scaleUp bool, policy v1.QuotaScalePolicy, quota *v12.ResourceQuota) *ActivePolicy {
 	active := &ActivePolicy{
