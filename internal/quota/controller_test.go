@@ -147,6 +147,26 @@ func TestRegisterNamespacedEventMarksQuotaDeniedEventsAsImmediate(t *testing.T) 
 	}
 }
 
+func TestRegisterNamespacedEventMarksInsufficientCPUAsImmediate(t *testing.T) {
+	watcher := &QuotaWatcher{Events: map[string][]corev1.Event{}, Started: time.Now().UTC().Add(-time.Minute)}
+
+	namespace, immediate := watcher.RegisterNamespacedEvent(watch.Event{
+		Type: watch.Added,
+		Object: &corev1.Event{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", CreationTimestamp: metav1.Now()},
+			Reason:     "FailedScheduling",
+			Message:    "0/4 nodes are available: 1 Insufficient cpu, 2 nodes had untolerated taints",
+			InvolvedObject: corev1.ObjectReference{
+				Kind: "Pod", Namespace: "default", Name: "pending-pod",
+			},
+		},
+	})
+
+	if namespace != "default" || !immediate {
+		t.Fatalf("expected FailedScheduling CPU pressure to trigger immediately, namespace=%q immediate=%v", namespace, immediate)
+	}
+}
+
 func TestRegisterNamespacedEventKeepsNonQuotaFailuresAggregated(t *testing.T) {
 	watcher := &QuotaWatcher{
 		Events:  map[string][]corev1.Event{},
@@ -421,6 +441,43 @@ func TestUpdateQuotaIfRequiredResizesImmediatelyWhenScaleOutMakesCapacityAvailab
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected immediate quota resize event")
+	}
+}
+
+func TestUpdateQuotaIfRequiredScalesNodesWhenQuotaAlreadyAtTarget(t *testing.T) {
+	pendingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-pod", Namespace: "default"},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3")},
+		}}}},
+	}
+	client := fake.NewSimpleClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")}}},
+		pendingPod,
+	)
+	handler := &captureScaleOutRequestHandler{onHandle: func() {
+		_, _ = client.CoreV1().Nodes().Create(context.TODO(), &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "activated-spare"},
+			Status:     corev1.NodeStatus{Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4")}},
+		}, metav1.CreateOptions{})
+	}}
+	watcher := &QuotaWatcher{Client: client, ScaleOutRequestHandler: handler, postScaleOutPollInterval: time.Millisecond, postScaleOutPollTimeout: time.Second}
+	quota := corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "quota", Namespace: "default"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("50"), corev1.ResourceMemory: resource.MustParse("50Gi"), corev1.ResourceRequestsStorage: resource.MustParse("0"),
+		}},
+		Status: corev1.ResourceQuotaStatus{Hard: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50"), corev1.ResourceMemory: resource.MustParse("50Gi")}, Used: corev1.ResourceList{}},
+	}
+	scaler := scalerv1.QuotaAutoscaler{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: scalerv1.QuotaAutoscalerSpec{ResourceQuota: "quota", MaxCpu: "50", MaxMemory: "50Gi"}}
+	events := []corev1.Event{{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Reason: "FailedScheduling", InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pending-pod"}}}
+
+	if err := watcher.UpdateQuotaIfRequired(quota, scaler, events); err != nil {
+		t.Fatalf("expected node activation with unchanged quota, got %v", err)
+	}
+	if !handler.called {
+		t.Fatal("expected FailedScheduling pod to activate a node even when quota is already at target")
 	}
 }
 

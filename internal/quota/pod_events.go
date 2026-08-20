@@ -102,6 +102,12 @@ func getPodTemplateSpecFromEv(client kubernetes.Interface, ev v12.Event) (v12.Po
 	namespace := ev.InvolvedObject.Namespace
 	name := ev.InvolvedObject.Name
 	switch ev.InvolvedObject.Kind {
+	case "Pod":
+		target, err := client.CoreV1().Pods(namespace).Get(context.TODO(), name, v13.GetOptions{})
+		if err != nil {
+			return pod, replicas, err
+		}
+		pod = v12.PodTemplateSpec{ObjectMeta: target.ObjectMeta, Spec: target.Spec}
 	case "ReplicaSet":
 		target, err := client.AppsV1().ReplicaSets(namespace).Get(context.TODO(), name, v13.GetOptions{})
 		if err != nil {

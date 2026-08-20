@@ -145,7 +145,7 @@ func (controller *QuotaController) Run(startScalers []v14.QuotaAutoscaler, quota
 			if ns != "" {
 				logging.LogDebug("[%s] PodEvent", ns)
 				if immediate {
-					logging.LogInfo("[%s] Quota denied event detected, triggering immediate quota evaluation", ns)
+					logging.LogInfo("[%s] Pod capacity event detected, triggering immediate quota and node evaluation", ns)
 					watcher.UpdateNs(ns, true)
 					delete(watcher.Events, ns)
 				}
@@ -275,7 +275,7 @@ func (watcher *QuotaWatcher) RegisterNamespacedEvent(event watch.Event) (string,
 		watcher.Events[target.Namespace] = append(watcher.Events[target.Namespace], *ev)
 	}
 
-	return ev.Namespace, IsImmediateQuotaDeniedEvent(ev)
+	return ev.Namespace, IsImmediateCapacityEvent(ev)
 }
 
 func (watcher *QuotaWatcher) shouldIgnoreHistoricalEvent(ev *v12.Event) bool {
@@ -325,6 +325,17 @@ func IsImmediateQuotaDeniedEvent(ev *v12.Event) bool {
 	return strings.Contains(message, "exceeded quota") ||
 		strings.Contains(message, "is forbidden") && strings.Contains(message, "quota") ||
 		strings.Contains(message, "quota") && strings.Contains(message, "denied")
+}
+
+func IsImmediateCapacityEvent(ev *v12.Event) bool {
+	if IsImmediateQuotaDeniedEvent(ev) {
+		return true
+	}
+	if ev == nil || ev.Reason != "FailedScheduling" || ev.InvolvedObject.Kind != "Pod" {
+		return false
+	}
+	message := strings.ToLower(ev.Message)
+	return strings.Contains(message, "insufficient cpu") || strings.Contains(message, "insufficient memory")
 }
 
 func ResourceQuotaUsedMemoryLimit(quota *v12.ResourceQuota) *resource.Quantity {
@@ -400,38 +411,38 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	}
 	logging.LogInfo("[%s] Calculated desired resources (%+v -> %+v) for namespace %s\n", quota.Namespace, current, desired, scaler.Namespace)
 	desired.ForceNoScaleDownWhenScaleUp(&quota)
+	capacityErr := EnsurePodDemandFitsCluster(watcher.Client, pendingPodRequests)
+	if capacityErr != nil && watcher.ScaleOutRequestHandler != nil {
+		if !watcher.beginPendingScaleOut(quota.Namespace) {
+			return &QuotaDeferredError{
+				Reason: fmt.Sprintf("node scale-out already pending; waiting for worker capacity before resizing quota: %s", capacityErr.Error()),
+			}
+		}
+
+		handleErr := watcher.ScaleOutRequestHandler.HandleScaleOutRequest(nodescaling.ScaleOutRequest{
+			Namespace: quota.Namespace,
+			Current:   current,
+			Desired:   *desired,
+			Reason:    capacityErr.Error(),
+		})
+		if handleErr != nil {
+			watcher.clearPendingScaleOut(quota.Namespace)
+			return handleErr
+		}
+
+		if capacityErr = watcher.waitForWorkerCapacity(pendingPodRequests); capacityErr != nil {
+			return &QuotaDeferredError{
+				Reason: fmt.Sprintf("node scale-out requested; waiting for worker capacity before resizing quota: %s", capacityErr.Error()),
+			}
+		}
+
+		watcher.clearPendingScaleOut(quota.Namespace)
+		logging.LogInfo("[%s] Worker capacity became available after node scale-out", quota.Namespace)
+	}
+
 	if desired.DiffersFrom(&quota) {
-		if err := EnsurePodDemandFitsCluster(watcher.Client, pendingPodRequests); err != nil {
-			if watcher.ScaleOutRequestHandler != nil && !desired.IsScaleDown(&quota) {
-				if !watcher.beginPendingScaleOut(quota.Namespace) {
-					return &QuotaDeferredError{
-						Reason: fmt.Sprintf("node scale-out already pending; waiting for worker capacity before resizing quota: %s", err.Error()),
-					}
-				}
-
-				handleErr := watcher.ScaleOutRequestHandler.HandleScaleOutRequest(nodescaling.ScaleOutRequest{
-					Namespace: quota.Namespace,
-					Current:   current,
-					Desired:   *desired,
-					Reason:    err.Error(),
-				})
-				if handleErr != nil {
-					watcher.clearPendingScaleOut(quota.Namespace)
-					return handleErr
-				}
-
-				if capacityErr := watcher.waitForWorkerCapacity(pendingPodRequests); capacityErr != nil {
-					return &QuotaDeferredError{
-						Reason: fmt.Sprintf("node scale-out requested; waiting for worker capacity before resizing quota: %s", capacityErr.Error()),
-					}
-				}
-
-				watcher.clearPendingScaleOut(quota.Namespace)
-				logging.LogInfo("[%s] Worker capacity became available after node scale-out; applying desired quota immediately", quota.Namespace)
-			}
-			if watcher.ScaleOutRequestHandler == nil || desired.IsScaleDown(&quota) {
-				return err
-			}
+		if capacityErr != nil {
+			return capacityErr
 		}
 
 		if !pendingPodRequests.IsEmpty() {
