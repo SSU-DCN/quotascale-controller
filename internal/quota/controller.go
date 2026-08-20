@@ -361,9 +361,6 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 		return errors.New("quota status is nil")
 	}
 
-	// Take CPU limits into account when limits are higher than requests.
-	quota.Status.Used[v12.ResourceCPU] = MaxResourceQuantity(quota.Status.Used.Cpu(), ResourceQuotaUsedCpuLimit(&quota))
-
 	for _, policy := range scaler.Spec.Behavior.ScaleDown.Policies {
 		desired.Replace(validatedScaler.ActivateScalerPolicy(policy, &quota, false))
 	}
@@ -380,7 +377,7 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 			}
 			logging.LogInfo("[%s] Namespace events require an extra %+v resources\n", scaler.Namespace, sum)
 			desired = (&resources.Resources{
-				Cpu:    quota.Status.Used.Cpu().ScaledValue(resource.Milli),
+				Cpu:    ResourceQuotaUsedCpuLimit(&quota).ScaledValue(resource.Milli),
 				Memory: ResourceQuotaUsedMemoryLimit(&quota).ScaledValue(resource.Mega),
 			}).Add(sum).Max(desired)
 		}
@@ -486,7 +483,7 @@ func (watcher *QuotaWatcher) namespaceNeedsScaleOut(quota v12.ResourceQuota, sca
 				pendingPodRequests = *requests
 			}
 			desired = (&resources.Resources{
-				Cpu:    quota.Status.Used.Cpu().ScaledValue(resource.Milli),
+				Cpu:    ResourceQuotaUsedCpuLimit(&quota).ScaledValue(resource.Milli),
 				Memory: ResourceQuotaUsedMemoryLimit(&quota).ScaledValue(resource.Mega),
 			}).Add(sum).Max(desired)
 		}

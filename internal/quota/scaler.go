@@ -109,7 +109,7 @@ func (scaler *ValidatedQuotaScaler) ToActivePolicy(scaleUp bool, policy v1.Quota
 	} else if strings.ToLower(policy.Method) == "cpu" {
 		active.IsCpu = true
 		active.CurrentMaximum = quota.Spec.Hard.Cpu().ScaledValue(resource.Milli)
-		active.Used = quota.Status.Used.Cpu().ScaledValue(resource.Milli)
+		active.Used = ResourceQuotaUsedCpuLimit(quota).ScaledValue(resource.Milli)
 
 		if scaleUp {
 			active.QuotaLimit = scaler.MaxCpu

@@ -76,6 +76,31 @@ func TestActivatePolicyDefaultsTargetUtilizationToValue(t *testing.T) {
 	}
 }
 
+func TestActivatePolicyUsesCPULimitsWhenHigherThanRequests(t *testing.T) {
+	scaler := ValidateQuotaScaler(&scalerv1.QuotaAutoscaler{
+		Spec: scalerv1.QuotaAutoscalerSpec{MaxCpu: "10"},
+	})
+	quota := resourceQuotaWithCPU("4", "1")
+	quota.Status.Used[corev1.ResourceLimitsCPU] = resource.MustParse("3")
+	policy := scalerv1.QuotaScalePolicy{
+		Method:            "cpu",
+		Value:             70,
+		TargetUtilization: 50,
+	}
+
+	active, desired := scaler.ActivatePolicy(true, policy, quota)
+
+	if active.Used != 3000 {
+		t.Fatalf("expected CPU limit usage 3000m, got %dm", active.Used)
+	}
+	if active.CurrentUsagePercentage != 75 {
+		t.Fatalf("expected limit-backed usage to be 75%%, got %d%%", active.CurrentUsagePercentage)
+	}
+	if desired != 6000 {
+		t.Fatalf("expected desired CPU quota 6000m, got %dm", desired)
+	}
+}
+
 func resourceQuotaWithCPU(hard, used string) *corev1.ResourceQuota {
 	return &corev1.ResourceQuota{
 		Spec: corev1.ResourceQuotaSpec{

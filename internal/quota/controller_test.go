@@ -10,6 +10,7 @@ import (
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
 	scalerv1 "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/apis/quotaautoscaler/v1"
 	scalerfake "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/client/clientset/versioned/fake"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +22,59 @@ type captureScaleOutRequestHandler struct {
 	called  bool
 	count   int
 	request nodescaling.ScaleOutRequest
+}
+
+func TestNamespaceNeedsScaleOutUsesCPULimitUsageForFailedCreates(t *testing.T) {
+	replicas := int32(11)
+	client := fake.NewSimpleClientset(
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-1"},
+			Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("8Gi"),
+			}},
+		},
+		&appsv1.ReplicaSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "classifier-rs", Namespace: "default"},
+			Spec: appsv1.ReplicaSetSpec{
+				Replicas: &replicas,
+				Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3")},
+					},
+				}}}},
+			},
+			Status: appsv1.ReplicaSetStatus{Replicas: 9},
+		},
+	)
+	watcher := &QuotaWatcher{Client: client}
+	quota := corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "resource-quota", Namespace: "default"},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceCPU:             resource.MustParse("35"),
+			corev1.ResourceMemory:          resource.MustParse("50Gi"),
+			corev1.ResourceRequestsStorage: resource.MustParse("0"),
+		}},
+		Status: corev1.ResourceQuotaStatus{Used: corev1.ResourceList{
+			corev1.ResourceCPU:       resource.MustParse("11275m"),
+			corev1.ResourceLimitsCPU: resource.MustParse("33"),
+		}},
+	}
+	scaler := scalerv1.QuotaAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec:       scalerv1.QuotaAutoscalerSpec{MaxCpu: "50", MaxMemory: "50Gi"},
+	}
+	events := []corev1.Event{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		InvolvedObject: corev1.ObjectReference{
+			Kind: "ReplicaSet", Namespace: "default", Name: "classifier-rs",
+		},
+	}}
+
+	if !watcher.namespaceNeedsScaleOut(quota, scaler, events) {
+		t.Fatal("expected missing pods to require scale-out when CPU limit usage plus missing limits exceeds current quota")
+	}
 }
 
 func (handler *captureScaleOutRequestHandler) HandleScaleOutRequest(request nodescaling.ScaleOutRequest) error {
