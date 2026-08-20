@@ -14,7 +14,13 @@ import (
 )
 
 func GetResourcesFromPodEvents(client kubernetes.Interface, events []v12.Event) (*resources.Resources, error) {
-	sum := &resources.Resources{}
+	quota, _, err := GetResourceDemandsFromPodEvents(client, events)
+	return quota, err
+}
+
+func GetResourceDemandsFromPodEvents(client kubernetes.Interface, events []v12.Event) (*resources.Resources, *resources.Resources, error) {
+	quotaSum := &resources.Resources{}
+	requestSum := &resources.Resources{}
 	involvedObjects := map[string]bool{} // Make sure we only handle each InvolvedObject once
 
 	for _, ev := range events {
@@ -33,12 +39,14 @@ func GetResourcesFromPodEvents(client kubernetes.Interface, events []v12.Event) 
 				continue // We process those we do know
 			}
 
-			res := CalculatePodResources(spec, int64(missingReplicas))
-			sum.Add(&res)
+			quotaResources := CalculatePodResources(spec, int64(missingReplicas))
+			requestResources := CalculatePodRequestResources(spec, int64(missingReplicas))
+			quotaSum.Add(&quotaResources)
+			requestSum.Add(&requestResources)
 		}
 	}
 
-	return sum, nil
+	return quotaSum, requestSum, nil
 }
 
 // CalculatePodResources sums the container resources of a Pod and multiplies them by the missing replicas.
@@ -69,6 +77,18 @@ func CalculatePodResources(podTemplate v12.PodTemplateSpec, missingReplicas int6
 		Cpu:    neededCpu.ScaledValue(resource.Milli) * missingReplicas,
 		Memory: neededMemory.ScaledValue(resource.Mega) * missingReplicas,
 	}
+}
+
+// CalculatePodRequestResources returns scheduler requests for missing replicas.
+// Quota expansion may use limits, but node capacity must only use requests.
+func CalculatePodRequestResources(podTemplate v12.PodTemplateSpec, missingReplicas int64) resources.Resources {
+	if missingReplicas <= 0 {
+		return resources.Resources{}
+	}
+	requested := PodRequestedResources(v12.Pod{Spec: podTemplate.Spec})
+	requested.Cpu *= missingReplicas
+	requested.Memory *= missingReplicas
+	return requested
 }
 
 func isDaemonSet(ev v12.Event) bool {

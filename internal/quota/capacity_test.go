@@ -70,68 +70,36 @@ func TestWorkerNodeAvailableResourcesExcludesOnlyScalingTaintedNodes(t *testing.
 	}
 }
 
-func TestEnsureScaleUpFitsClusterRejectsUnavailableCapacity(t *testing.T) {
+func TestEnsurePodDemandFitsClusterRejectsUnavailableCapacity(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		node("worker-1", "4", "4Gi", nil),
 		pod("running", "worker-1", corev1.PodRunning, "1000m", "1Gi"),
 	)
 
-	err := EnsureScaleUpFitsCluster(
-		client,
-		resources.Resources{Cpu: 2500, Memory: 2048},
-		resources.Resources{Cpu: 1000, Memory: 1024},
-		resources.Resources{Cpu: 6000, Memory: 5120},
-	)
+	err := EnsurePodDemandFitsCluster(client, resources.Resources{Cpu: 3500, Memory: 3500})
 	if err == nil {
-		t.Fatalf("expected scale up to be rejected when required incremental quota exceeds worker availability")
+		t.Fatal("expected pending pod requests to be rejected when they exceed worker availability")
 	}
 }
 
-func TestEnsureScaleUpFitsClusterRejectsDesiredTotalWhenOnlyQuotaIncrementFits(t *testing.T) {
+func TestEnsurePodDemandFitsClusterAllowsSchedulableRequests(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		node("worker-1", "4", "4Gi", nil),
 		pod("running", "worker-1", corev1.PodRunning, "500m", "512Mi"),
 	)
 
-	err := EnsureScaleUpFitsCluster(
-		client,
-		resources.Resources{Cpu: 4000, Memory: 2048},
-		resources.Resources{Cpu: 500, Memory: 512},
-		resources.Resources{Cpu: 5000, Memory: 3072},
-	)
-	if err == nil {
-		t.Fatal("expected scale up to be rejected when desired quota is not backed by worker capacity")
-	}
-}
-
-func TestEnsureScaleUpFitsClusterAllowsDesiredQuotaBackedByUsageAndAvailableCapacity(t *testing.T) {
-	client := fake.NewSimpleClientset(
-		node("worker-1", "8", "8Gi", nil),
-		pod("running", "worker-1", corev1.PodRunning, "2000m", "2Gi"),
-	)
-
-	err := EnsureScaleUpFitsCluster(
-		client,
-		resources.Resources{Cpu: 4000, Memory: 4096},
-		resources.Resources{Cpu: 2000, Memory: 2048},
-		resources.Resources{Cpu: 7000, Memory: 7168},
-	)
+	err := EnsurePodDemandFitsCluster(client, resources.Resources{Cpu: 3000, Memory: 3072})
 	if err != nil {
-		t.Fatalf("expected desired quota to fit usage plus available worker capacity, got error: %v", err)
+		t.Fatalf("expected pending pod requests to fit worker availability, got error: %v", err)
 	}
 }
 
-func TestEnsureScaleUpFitsClusterAllowsScaleDownWithoutCapacityCheck(t *testing.T) {
+func TestEnsurePodDemandFitsClusterAllowsEmptyDemand(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
-	err := EnsureScaleUpFitsCluster(
-		client,
-		resources.Resources{Cpu: 4000, Memory: 4096},
-		resources.Resources{Cpu: 1000, Memory: 1024},
-		resources.Resources{Cpu: 2000, Memory: 2048},
-	)
+	err := EnsurePodDemandFitsCluster(client, resources.Resources{})
 	if err != nil {
-		t.Fatalf("expected scale down to bypass capacity check, got error: %v", err)
+		t.Fatalf("expected empty pending demand to bypass capacity check, got error: %v", err)
 	}
 }
 

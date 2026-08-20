@@ -11,33 +11,20 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-func EnsureScaleUpFitsCluster(client kubernetes.Interface, current, used, desired resources.Resources) error {
-	if desired.Cpu <= current.Cpu && desired.Memory <= current.Memory {
+func EnsurePodDemandFitsCluster(client kubernetes.Interface, demand resources.Resources) error {
+	if demand.IsEmpty() {
 		return nil
-	}
-
-	// Available worker capacity already excludes resources requested by running
-	// pods. Subtract the namespace's actual usage from its desired quota so that
-	// the remaining quota can also be backed by currently available capacity.
-	// Using desired-current here would repeatedly count previously granted but
-	// unused quota as if it had reserved cluster capacity.
-	required := resources.Resources{}
-	if desired.Cpu > used.Cpu {
-		required.Cpu = desired.Cpu - used.Cpu
-	}
-	if desired.Memory > used.Memory {
-		required.Memory = desired.Memory - used.Memory
 	}
 
 	available, err := WorkerNodeAvailableResources(client)
 	if err != nil {
 		return err
 	}
-	if required.Cpu > available.Cpu || required.Memory > available.Memory {
+	if demand.Cpu > available.Cpu || demand.Memory > available.Memory {
 		return fmt.Errorf(
-			"desired quota requires CPU %dm and memory %dM beyond namespace usage, but worker node available CPU is %dm and memory is %dM",
-			required.Cpu,
-			required.Memory,
+			"pending pods request CPU %dm and memory %dM, but worker node available CPU is %dm and memory is %dM",
+			demand.Cpu,
+			demand.Memory,
 			available.Cpu,
 			available.Memory,
 		)
