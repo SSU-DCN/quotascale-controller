@@ -1,4 +1,4 @@
-FROM golang:1.17-buster as builder
+FROM golang:1.22-bookworm AS builder
 
 RUN mkdir /app
 RUN mkdir /app/conf
