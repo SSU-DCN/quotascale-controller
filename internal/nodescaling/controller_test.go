@@ -1532,7 +1532,7 @@ func TestNodeScalingControllerSchedulableWorkerNodeAvailableResourcesSubtractsRu
 	}
 }
 
-func TestNodeScalingControllerManagedQuotaLimitTotalsAutoResolvesSingleResourceQuota(t *testing.T) {
+func TestNodeScalingControllerManagedQuotaLimitTotalsUsesExplicitResourceQuota(t *testing.T) {
 	client := fake.NewSimpleClientset(
 		&v12.ResourceQuota{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1553,6 +1553,7 @@ func TestNodeScalingControllerManagedQuotaLimitTotalsAutoResolvesSingleResourceQ
 				Name:      "scaler-a",
 				Namespace: "default",
 			},
+			Spec: scalerv1.QuotaAutoscalerSpec{ResourceQuota: "quota-a"},
 		},
 	)
 
@@ -1561,7 +1562,7 @@ func TestNodeScalingControllerManagedQuotaLimitTotalsAutoResolvesSingleResourceQ
 
 	total, err := controller.ManagedQuotaLimitTotals()
 	if err != nil {
-		t.Fatalf("expected managed quota totals to resolve a single ResourceQuota automatically, got error: %v", err)
+		t.Fatalf("expected managed quota totals to resolve the explicit ResourceQuota, got error: %v", err)
 	}
 	if total.Cpu != 2000 {
 		t.Fatalf("expected total cpu 2000m, got %d", total.Cpu)

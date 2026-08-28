@@ -32,7 +32,7 @@ spec:
               properties:
                 resourceQuota:
                   type: string
-                  description: Optional. Name of the ResourceQuota in your namespace. When omitted, the controller auto-selects it only if exactly one ResourceQuota exists in the namespace.
+                  description: Optional. Name of an existing ResourceQuota in this namespace. When omitted, the controller creates and manages resource-quota using the configured minimums.
                 min.cpu:
                   type: string
                   description: Minimal CPU the Autoscaler can set for a quota

@@ -69,7 +69,7 @@ Purpose:
 
 Key spec fields:
 
-- `resourceQuota`: optional target `ResourceQuota` name in the same namespace
+- `resourceQuota`: optional existing target `ResourceQuota` name in the same namespace; when omitted, the controller creates `resource-quota`
 - `min.cpu`
 - `max.cpu`
 - `min.memory`
@@ -83,8 +83,10 @@ Each policy supports:
 - `value`: threshold percentage
 - `targetUtilization`: desired utilization percentage after scaling
 
-If `spec.resourceQuota` is omitted, the controller automatically finds the namespace `ResourceQuota` only when exactly one exists and writes that name back into the `QuotaAutoscaler` spec.
-If multiple `ResourceQuota` objects exist in the namespace, the field must still be set explicitly.
+If `spec.resourceQuota` is omitted, the controller creates a `ResourceQuota` named `resource-quota` in the `QuotaAutoscaler` namespace. Its initial `requests.cpu` and `limits.cpu` hard values come from `min.cpu`; its initial `requests.memory` and `limits.memory` hard values come from `min.memory`. The created quota has the `QuotaAutoscaler` as its controller owner, and the controller writes `resource-quota` back into `spec.resourceQuota`.
+
+An unrelated `ResourceQuota` in the same namespace is not selected or modified. To keep managing an existing quota, set its name explicitly in `spec.resourceQuota`.
+If an unrelated object already uses the default `resource-quota` name, automatic creation fails instead of silently adopting it.
 
 Example:
 
@@ -95,7 +97,6 @@ metadata:
   name: default-quotascale-controller
   namespace: default
 spec:
-  resourceQuota: compute-resources
   min.cpu: "4000m"
   max.cpu: "6"
   min.memory: "4G"

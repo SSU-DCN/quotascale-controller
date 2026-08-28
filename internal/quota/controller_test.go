@@ -568,15 +568,8 @@ func TestUpdateQuotaIfRequiredDeduplicatesPendingScaleOutRequests(t *testing.T) 
 	}
 }
 
-func TestRegisterScalerEventAutoResolvesSingleResourceQuota(t *testing.T) {
-	kubeClient := fake.NewSimpleClientset(
-		&corev1.ResourceQuota{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "compute-resources",
-				Namespace: "default",
-			},
-		},
-	)
+func TestRegisterScalerEventCreatesManagedResourceQuota(t *testing.T) {
+	kubeClient := fake.NewSimpleClientset()
 	scalerClient := scalerfake.NewSimpleClientset(
 		&scalerv1.QuotaAutoscaler{
 			ObjectMeta: metav1.ObjectMeta{
@@ -600,6 +593,7 @@ func TestRegisterScalerEventAutoResolvesSingleResourceQuota(t *testing.T) {
 				Name:      "qa",
 				Namespace: "default",
 			},
+			Spec: scalerv1.QuotaAutoscalerSpec{MinCpu: "6", MinMemory: "6Gi"},
 		},
 	})
 	if namespace != "default" {
@@ -607,10 +601,10 @@ func TestRegisterScalerEventAutoResolvesSingleResourceQuota(t *testing.T) {
 	}
 
 	storedScaler := watcher.Scalers["default"]
-	if storedScaler.Spec.ResourceQuota != "compute-resources" {
+	if storedScaler.Spec.ResourceQuota != "resource-quota" {
 		t.Fatalf("expected watcher scaler spec.resourceQuota to be auto-populated, got %q", storedScaler.Spec.ResourceQuota)
 	}
-	if watcher.Quotas["default"].Name != "compute-resources" {
+	if watcher.Quotas["default"].Name != "resource-quota" {
 		t.Fatalf("expected watcher quota cache to be populated, got %#v", watcher.Quotas["default"])
 	}
 
@@ -618,7 +612,7 @@ func TestRegisterScalerEventAutoResolvesSingleResourceQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected persisted QuotaAutoscaler to be readable, got error: %v", err)
 	}
-	if persistedScaler.Spec.ResourceQuota != "compute-resources" {
+	if persistedScaler.Spec.ResourceQuota != "resource-quota" {
 		t.Fatalf("expected persisted spec.resourceQuota to be auto-populated, got %q", persistedScaler.Spec.ResourceQuota)
 	}
 }
