@@ -2,6 +2,7 @@ FROM golang:1.22-bookworm AS builder
 
 RUN mkdir /app
 RUN mkdir /app/conf
+RUN mkdir -m 1777 /runtime-tmp
 
 ADD . /app/
 WORKDIR /app
@@ -16,6 +17,7 @@ LABEL com.ing.name="quotascale_controller" \
 
 WORKDIR /app/
 COPY --from=builder /app/main /app/main
+COPY --from=builder --chown=1001:0 /runtime-tmp /tmp
 USER 1001
 
 ENTRYPOINT ["./main"]
