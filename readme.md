@@ -6,6 +6,8 @@ When node scaling is enabled, the controller also coordinates a second control l
 
 For the end-to-end demo manifests and Locust traffic replay setup, see [example/test/README.md](example/test/README.md).
 
+Container images are published to `ghcr.io/ssu-dcn/quotascale-controller`. Every pushed commit receives an immutable `sha-<short-sha>` tag; pushes to `main` also update `latest`.
+
 ## What this project does
 
 - Automatically scales `ResourceQuota` `requests.cpu`, `limits.cpu`, `requests.memory`, and `limits.memory`
