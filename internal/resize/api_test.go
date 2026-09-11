@@ -80,18 +80,16 @@ func TestResourceQuotaPatchSetsRequestsAndLimitsToDesiredResources(t *testing.T)
 		} `json:"spec"`
 	}
 
-	err := json.Unmarshal(ResourceQuotaPatch(resources.Resources{Cpu: 1200, Memory: 4096}), &patch)
+	err := json.Unmarshal(ResourceQuotaPatch(resources.Resources{Cpu: 2400, Memory: 8192, RequestsCpu: 1200, RequestsMemory: 4096}), &patch)
 	if err != nil {
 		t.Fatalf("expected valid JSON patch, got error: %v", err)
 	}
 
 	expected := map[string]string{
-		"cpu":             "1200m",
 		"requests.cpu":    "1200m",
-		"limits.cpu":      "1200m",
-		"memory":          "4096M",
+		"limits.cpu":      "2400m",
 		"requests.memory": "4096M",
-		"limits.memory":   "4096M",
+		"limits.memory":   "8192M",
 	}
 
 	for key, value := range expected {

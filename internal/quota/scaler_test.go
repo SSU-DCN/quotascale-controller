@@ -101,6 +101,32 @@ func TestActivatePolicyUsesCPULimitsWhenHigherThanRequests(t *testing.T) {
 	}
 }
 
+func TestActivateScalerPolicyScalesRequestsAndLimitsIndependently(t *testing.T) {
+	scaler := ValidateQuotaScaler(&scalerv1.QuotaAutoscaler{
+		Spec: scalerv1.QuotaAutoscalerSpec{MinCpu: "1", MaxCpu: "50"},
+	})
+	quota := &corev1.ResourceQuota{
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceRequestsCPU: resource.MustParse("10"),
+			corev1.ResourceLimitsCPU:   resource.MustParse("20"),
+		}},
+		Status: corev1.ResourceQuotaStatus{Used: corev1.ResourceList{
+			corev1.ResourceRequestsCPU: resource.MustParse("8"),
+			corev1.ResourceLimitsCPU:   resource.MustParse("10"),
+		}},
+	}
+	policy := scalerv1.QuotaScalePolicy{Method: "cpu", Value: 70, TargetUtilization: 50}
+
+	desired := scaler.ActivateScalerPolicy(policy, quota, true)
+
+	if desired.RequestsCpu != 16000 {
+		t.Fatalf("expected requests.cpu to scale independently to 16000m, got %dm", desired.RequestsCpu)
+	}
+	if desired.Cpu != 0 {
+		t.Fatalf("expected limits.cpu to remain unchanged, got desired %dm", desired.Cpu)
+	}
+}
+
 func TestValidateQuotaScalerPreservesConfiguredMaximumsAboveDefaults(t *testing.T) {
 	scaler := ValidateQuotaScaler(&scalerv1.QuotaAutoscaler{
 		Spec: scalerv1.QuotaAutoscalerSpec{

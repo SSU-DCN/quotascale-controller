@@ -38,6 +38,7 @@ type ValidatedQuotaScaler struct {
 
 type ActivePolicy struct {
 	IsCpu                  bool
+	IsRequest              bool
 	CurrentMaximum         int64
 	CurrentUsagePercentage int64
 	PolicyThreshold        int64
@@ -76,9 +77,18 @@ func ParseQuantityWithDefault(value string, scale resource.Scale, def int64) int
 
 // ToActivePolicy converts a QuotaScalePolicy to an ActivePolicy given the scaleUp type and ResourceQuota values.
 func (scaler *ValidatedQuotaScaler) ToActivePolicy(scaleUp bool, policy v1.QuotaScalePolicy, quota *v12.ResourceQuota) *ActivePolicy {
+	resourceName := v12.ResourceLimitsCPU
+	if strings.ToLower(policy.Method) == "memory" {
+		resourceName = v12.ResourceLimitsMemory
+	}
+	return scaler.toActivePolicyForResource(scaleUp, policy, quota, resourceName)
+}
+
+func (scaler *ValidatedQuotaScaler) toActivePolicyForResource(scaleUp bool, policy v1.QuotaScalePolicy, quota *v12.ResourceQuota, resourceName v12.ResourceName) *ActivePolicy {
 	active := &ActivePolicy{
 		PolicyThreshold:   int64(policy.Value),
 		TargetUtilization: int64(policy.TargetUtilization),
+		IsRequest:         resourceName == v12.ResourceRequestsCPU || resourceName == v12.ResourceRequestsMemory,
 	}
 	if active.TargetUtilization == 0 {
 		active.TargetUtilization = active.PolicyThreshold
@@ -86,8 +96,8 @@ func (scaler *ValidatedQuotaScaler) ToActivePolicy(scaleUp bool, policy v1.Quota
 
 	if strings.ToLower(policy.Method) == "memory" {
 		active.IsCpu = false
-		active.CurrentMaximum = quota.Spec.Hard.Memory().ScaledValue(resource.Mega)
-		active.Used = ResourceQuotaUsedMemoryLimit(quota).ScaledValue(resource.Mega)
+		active.CurrentMaximum = quotaResourceValue(quota.Spec.Hard, resourceName, v12.ResourceMemory, resource.Mega)
+		active.Used = quotaResourceValue(quota.Status.Used, resourceName, v12.ResourceMemory, resource.Mega)
 
 		if scaleUp {
 			active.QuotaLimit = scaler.MaxMemory
@@ -96,8 +106,8 @@ func (scaler *ValidatedQuotaScaler) ToActivePolicy(scaleUp bool, policy v1.Quota
 		}
 	} else if strings.ToLower(policy.Method) == "cpu" {
 		active.IsCpu = true
-		active.CurrentMaximum = quota.Spec.Hard.Cpu().ScaledValue(resource.Milli)
-		active.Used = ResourceQuotaUsedCpuLimit(quota).ScaledValue(resource.Milli)
+		active.CurrentMaximum = quotaResourceValue(quota.Spec.Hard, resourceName, v12.ResourceCPU, resource.Milli)
+		active.Used = quotaResourceValue(quota.Status.Used, resourceName, v12.ResourceCPU, resource.Milli)
 
 		if scaleUp {
 			active.QuotaLimit = scaler.MaxCpu
@@ -110,6 +120,14 @@ func (scaler *ValidatedQuotaScaler) ToActivePolicy(scaleUp bool, policy v1.Quota
 		active.CurrentUsagePercentage = int64(float64(active.Used) / float64(active.CurrentMaximum) * 100)
 	}
 	return active
+}
+
+func quotaResourceValue(list v12.ResourceList, name, legacyName v12.ResourceName, scale resource.Scale) int64 {
+	if value, ok := list[name]; ok {
+		return value.ScaledValue(scale)
+	}
+	value := list[legacyName]
+	return value.ScaledValue(scale)
 }
 
 // ActivatePolicy first converts a QuotaScalePolicy to an ActivePolicy given the scaleUp type and ResourceQuota values.
@@ -140,17 +158,46 @@ func (scaler *ValidatedQuotaScaler) ActivatePolicy(scaleUp bool, policy v1.Quota
 
 func (scaler *ValidatedQuotaScaler) ActivateScalerPolicy(policy v1.QuotaScalePolicy, quota *v12.ResourceQuota, scaleUp bool) *resources.Resources {
 	desired := &resources.Resources{}
+	resourceNames := []v12.ResourceName{v12.ResourceRequestsCPU, v12.ResourceLimitsCPU}
+	if strings.ToLower(policy.Method) == "memory" {
+		resourceNames = []v12.ResourceName{v12.ResourceRequestsMemory, v12.ResourceLimitsMemory}
+	}
 
-	active, target := scaler.ActivatePolicy(scaleUp, policy, quota)
-	if target != 0 {
-		if active.IsCpu {
-			desired.Cpu = target
-		} else {
-			desired.Memory = target
+	for _, resourceName := range resourceNames {
+		active := scaler.toActivePolicyForResource(scaleUp, policy, quota, resourceName)
+		target := activatePolicy(active, scaleUp, policy.Method)
+		if target != 0 {
+			switch resourceName {
+			case v12.ResourceRequestsCPU:
+				desired.RequestsCpu = target
+			case v12.ResourceLimitsCPU:
+				desired.Cpu = target
+			case v12.ResourceRequestsMemory:
+				desired.RequestsMemory = target
+			case v12.ResourceLimitsMemory:
+				desired.Memory = target
+			}
 		}
 	}
 
 	return desired
+}
+
+func activatePolicy(active *ActivePolicy, scaleUp bool, method string) int64 {
+	if active.TargetUtilization <= 0 {
+		logging.LogError("Invalid target utilization %d for %s policy", active.TargetUtilization, method)
+		return 0
+	}
+	if active.PolicyThreshold == 100 {
+		if !scaleUp && active.Used != active.CurrentMaximum {
+			return utils.Max(active.Used, active.QuotaLimit)
+		}
+	} else if scaleUp && active.CurrentUsagePercentage > active.PolicyThreshold {
+		return CalculateScaleUp(active)
+	} else if !scaleUp && active.CurrentUsagePercentage < active.PolicyThreshold {
+		return CalculateScaleDown(active)
+	}
+	return 0
 }
 
 // CalculateScaleUp calculates the desired value a quota should have given the scaleUp policy.

@@ -354,6 +354,35 @@ func ResourceQuotaUsedCpuLimit(quota *v12.ResourceQuota) *resource.Quantity {
 	return &cpuLimit
 }
 
+func quotaValue(list v12.ResourceList, name, legacyName v12.ResourceName, scale resource.Scale) int64 {
+	if value, ok := list[name]; ok {
+		return value.ScaledValue(scale)
+	}
+	value := list[legacyName]
+	return value.ScaledValue(scale)
+}
+
+func currentQuotaResources(quota *v12.ResourceQuota) resources.Resources {
+	return resources.Resources{
+		Cpu:            quotaValue(quota.Spec.Hard, v12.ResourceLimitsCPU, v12.ResourceCPU, resource.Milli),
+		Memory:         quotaValue(quota.Spec.Hard, v12.ResourceLimitsMemory, v12.ResourceMemory, resource.Mega),
+		RequestsCpu:    quotaValue(quota.Spec.Hard, v12.ResourceRequestsCPU, v12.ResourceCPU, resource.Milli),
+		RequestsMemory: quotaValue(quota.Spec.Hard, v12.ResourceRequestsMemory, v12.ResourceMemory, resource.Mega),
+	}
+}
+
+func boundQuotaResources(desired *resources.Resources, scaler *ValidatedQuotaScaler) {
+	desired.Max(&resources.Resources{
+		Cpu: scaler.MinCpu, Memory: scaler.MinMemory,
+		RequestsCpu: scaler.MinCpu, RequestsMemory: scaler.MinMemory,
+	})
+	desired.Limit(&resources.Resources{
+		Cpu: scaler.MaxCpu, Memory: scaler.MaxMemory,
+		RequestsCpu: scaler.MaxCpu, RequestsMemory: scaler.MaxMemory,
+	})
+	desired.EnsureRequestsFitLimits()
+}
+
 func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scaler v14.QuotaAutoscaler, events []v12.Event) error {
 	defer func() {
 		// When this reconciliation no longer needs an external scale-out request,
@@ -365,10 +394,8 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 
 	validatedScaler := ValidateQuotaScaler(&scaler)
 	pendingPodRequests := resources.Resources{}
-	desired := &resources.Resources{
-		Cpu:    quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
-		Memory: quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
-	}
+	desiredValue := currentQuotaResources(&quota)
+	desired := &desiredValue
 
 	if quota.Status.Used == nil || quota.Status.Hard == nil {
 		return errors.New("quota status is nil")
@@ -389,10 +416,15 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 				pendingPodRequests = *requests
 			}
 			logging.LogInfo("[%s] Namespace events require an extra %+v resources\n", scaler.Namespace, sum)
-			desired = (&resources.Resources{
+			limitDesired := (&resources.Resources{
 				Cpu:    ResourceQuotaUsedCpuLimit(&quota).ScaledValue(resource.Milli),
 				Memory: ResourceQuotaUsedMemoryLimit(&quota).ScaledValue(resource.Mega),
-			}).Add(sum).Max(desired)
+			}).Add(sum)
+			requestDesired := &resources.Resources{
+				RequestsCpu:    quotaValue(quota.Status.Used, v12.ResourceRequestsCPU, v12.ResourceCPU, resource.Milli) + requests.Cpu,
+				RequestsMemory: quotaValue(quota.Status.Used, v12.ResourceRequestsMemory, v12.ResourceMemory, resource.Mega) + requests.Memory,
+			}
+			desired.Max(limitDesired).Max(requestDesired)
 		}
 	}
 
@@ -400,15 +432,11 @@ func (watcher *QuotaWatcher) UpdateQuotaIfRequired(quota v12.ResourceQuota, scal
 	storage := quota.Spec.Hard["requests.storage"]
 
 	// Make sure desired quota is within bounds
-	desired.Max(&resources.Resources{Cpu: validatedScaler.MinCpu, Memory: validatedScaler.MinMemory})
-	desired.Limit(&resources.Resources{Cpu: validatedScaler.MaxCpu, Memory: validatedScaler.MaxMemory})
+	boundQuotaResources(desired, validatedScaler)
 	desired.Storage = storage.ScaledValue(resource.Giga)
 
-	current := resources.Resources{
-		Cpu:     quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
-		Memory:  quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
-		Storage: storage.ScaledValue(resource.Giga),
-	}
+	current := currentQuotaResources(&quota)
+	current.Storage = storage.ScaledValue(resource.Giga)
 	logging.LogInfo("[%s] Calculated desired resources (%+v -> %+v) for namespace %s\n", quota.Namespace, current, desired, scaler.Namespace)
 	desired.ForceNoScaleDownWhenScaleUp(&quota)
 	capacityErr := EnsurePodDemandFitsCluster(watcher.Client, pendingPodRequests)
@@ -511,10 +539,8 @@ func (watcher *QuotaWatcher) clearPendingScaleOut(namespace string) {
 func (watcher *QuotaWatcher) namespaceNeedsScaleOut(quota v12.ResourceQuota, scaler v14.QuotaAutoscaler, events []v12.Event) bool {
 	validatedScaler := ValidateQuotaScaler(&scaler)
 	pendingPodRequests := resources.Resources{}
-	desired := &resources.Resources{
-		Cpu:    quota.Spec.Hard.Cpu().ScaledValue(resource.Milli),
-		Memory: quota.Spec.Hard.Memory().ScaledValue(resource.Mega),
-	}
+	desiredValue := currentQuotaResources(&quota)
+	desired := &desiredValue
 
 	for _, policy := range scaler.Spec.Behavior.ScaleDown.Policies {
 		desired.Replace(validatedScaler.ActivateScalerPolicy(policy, &quota, false))
@@ -528,16 +554,20 @@ func (watcher *QuotaWatcher) namespaceNeedsScaleOut(quota v12.ResourceQuota, sca
 			if requests != nil {
 				pendingPodRequests = *requests
 			}
-			desired = (&resources.Resources{
+			limitDesired := (&resources.Resources{
 				Cpu:    ResourceQuotaUsedCpuLimit(&quota).ScaledValue(resource.Milli),
 				Memory: ResourceQuotaUsedMemoryLimit(&quota).ScaledValue(resource.Mega),
-			}).Add(sum).Max(desired)
+			}).Add(sum)
+			requestDesired := &resources.Resources{
+				RequestsCpu:    quotaValue(quota.Status.Used, v12.ResourceRequestsCPU, v12.ResourceCPU, resource.Milli) + requests.Cpu,
+				RequestsMemory: quotaValue(quota.Status.Used, v12.ResourceRequestsMemory, v12.ResourceMemory, resource.Mega) + requests.Memory,
+			}
+			desired.Max(limitDesired).Max(requestDesired)
 		}
 	}
 
 	storage := quota.Spec.Hard["requests.storage"]
-	desired.Max(&resources.Resources{Cpu: validatedScaler.MinCpu, Memory: validatedScaler.MinMemory})
-	desired.Limit(&resources.Resources{Cpu: validatedScaler.MaxCpu, Memory: validatedScaler.MaxMemory})
+	boundQuotaResources(desired, validatedScaler)
 	desired.Storage = storage.ScaledValue(resource.Giga)
 	desired.ForceNoScaleDownWhenScaleUp(&quota)
 	if !desired.DiffersFrom(&quota) || desired.IsScaleDown(&quota) {
