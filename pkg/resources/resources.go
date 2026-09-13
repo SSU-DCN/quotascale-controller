@@ -99,6 +99,22 @@ func (res *Resources) IsEmpty() bool {
 }
 
 func (res *Resources) DiffersFrom(quota *v1.ResourceQuota) bool {
+	// Explicit request/limit quotas replaced the legacy aggregate aliases. A
+	// merge patch must still run once to remove aliases left by older versions.
+	if _, legacy := quota.Spec.Hard[v1.ResourceCPU]; legacy {
+		_, requests := quota.Spec.Hard[v1.ResourceRequestsCPU]
+		_, limits := quota.Spec.Hard[v1.ResourceLimitsCPU]
+		if requests || limits {
+			return true
+		}
+	}
+	if _, legacy := quota.Spec.Hard[v1.ResourceMemory]; legacy {
+		_, requests := quota.Spec.Hard[v1.ResourceRequestsMemory]
+		_, limits := quota.Spec.Hard[v1.ResourceLimitsMemory]
+		if requests || limits {
+			return true
+		}
+	}
 	if res.Cpu != resourceValue(quota.Spec.Hard, v1.ResourceLimitsCPU, v1.ResourceCPU, resource.Milli) {
 		return true
 	}

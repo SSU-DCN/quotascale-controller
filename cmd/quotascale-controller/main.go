@@ -68,7 +68,8 @@ func main() {
 		Password:     *nodeScalingGitPassword,
 	})
 	if err != nil {
-		panic(err)
+		logging.LogError("Node scaling initialization failed; continuing with quota scaling only: %v", err)
+		nodeScalingRuntime = nil
 	}
 	var scaleOutRequestHandler nodescaling.ScaleOutRequestHandler
 	if nodeScalingRuntime != nil {
