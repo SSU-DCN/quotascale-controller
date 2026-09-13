@@ -242,19 +242,11 @@ func (controller *NodeScalingController) ReconcileScaleOut(request ScaleOutReque
 		return fmt.Errorf("kubernetes client is not configured for node scaling")
 	}
 
-	if err := controller.syncRepoIfConfigured(); err != nil {
-		return err
-	}
-
-	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
-	if err != nil {
-		return err
-	}
-
 	inventory, err := controller.inventoryStore.Get()
 	if err != nil {
 		return err
 	}
+	replicas := inventory.Spec.MachineDeploymentReplicas
 
 	activationLimit := controller.scaleOutBatchSize()
 	waiterNodes := controller.FindReusableScaleInWaiterNodes(inventory, activationLimit)
@@ -311,6 +303,24 @@ func (controller *NodeScalingController) ReconcileScaleOut(request ScaleOutReque
 	}
 	controller.resetScaleInTrigger()
 
+	// Activating existing nodes is independent of Git. Replenishing the spare
+	// pool changes MachineDeployment replicas and is therefore best-effort when
+	// the repository is unavailable.
+	if err := controller.syncRepoIfConfigured(); err != nil {
+		logging.LogWarning("[%s] Activated existing spare nodes %s, but deferred spare replenishment because node scaling Git sync failed: %s", request.Namespace, strings.Join(activatedNodeNames, ", "), err.Error())
+		return nil
+	}
+	if repoReplicas, readErr := controller.runtime.ReadMachineDeploymentReplicas(); readErr != nil {
+		logging.LogWarning("[%s] Activated existing spare nodes %s, but deferred spare replenishment because MachineDeployment manifest is unavailable: %s", request.Namespace, strings.Join(activatedNodeNames, ", "), readErr.Error())
+		return nil
+	} else {
+		replicas = repoReplicas
+		targetReplicas = replicas + replenishCount
+		if controller.maxNodeCount > 0 && targetReplicas > controller.maxNodeCount {
+			targetReplicas = controller.maxNodeCount
+		}
+	}
+
 	if targetReplicas != replicas {
 		if err := controller.runtime.WriteMachineDeploymentReplicas(targetReplicas); err != nil {
 			return err
@@ -351,15 +361,6 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 		return fmt.Errorf("kubernetes client is not configured for node scaling")
 	}
 
-	replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
-	if err != nil {
-		return err
-	}
-
-	if err := controller.syncRepoIfConfigured(); err != nil {
-		return err
-	}
-
 	inventory, err := controller.inventoryStore.Get()
 	if err != nil {
 		return err
@@ -369,7 +370,11 @@ func (controller *NodeScalingController) ReconcileScaleIn(request ScaleInRequest
 	unusedCount := CountUnusedInventoryNodes(inventory)
 	excessUnused := unusedCount - preparedSpareCount
 	if excessUnused > 0 {
-		replicas, err = controller.runtime.ReadMachineDeploymentReplicas()
+		if err := controller.syncRepoIfConfigured(); err != nil {
+			logging.LogWarning("[%s] Deferred removal of %d excess spare nodes because node scaling Git sync failed: %s", request.Namespace, excessUnused, err.Error())
+			return nil
+		}
+		replicas, err := controller.runtime.ReadMachineDeploymentReplicas()
 		if err != nil {
 			return err
 		}

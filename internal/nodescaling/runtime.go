@@ -67,11 +67,14 @@ func InitializeNodeScaling(enabled bool, overrides NodeScalingConfig) (*NodeScal
 		Config:  cfg,
 		RepoDir: filepath.Join(os.TempDir(), defaultNodeScalingRepoDir),
 	}
+	nodeScalingRuntime = runtime
 	if err := runtime.SyncRepo(); err != nil {
-		return nil, err
+		// Kubernetes-side spare activation and reservation do not require the
+		// Git checkout. Return the runtime so those operations remain available;
+		// callers can defer manifest changes until the repository recovers.
+		return runtime, err
 	}
 
-	nodeScalingRuntime = runtime
 	return runtime, nil
 }
 

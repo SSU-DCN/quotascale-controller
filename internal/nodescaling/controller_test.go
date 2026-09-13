@@ -313,6 +313,43 @@ func TestNodeScalingControllerReconcileScaleOutActivatesInventoryNodeAndIncremen
 	}
 }
 
+func TestNodeScalingControllerReconcileScaleOutActivatesSpareWhenGitIsUnavailable(t *testing.T) {
+	store := &captureNodeScalingInventoryStore{inventory: &inventoryv1.NodeScalingInventory{
+		Spec: inventoryv1.NodeScalingInventorySpec{
+			MachineDeploymentReplicas: 2,
+			Nodes:                     []inventoryv1.NodeScalingInventoryNode{{Name: "node-a", Order: 1, Used: false}},
+		},
+	}}
+	client := fake.NewSimpleClientset(&v12.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "node-a",
+			Labels: map[string]string{"node-role.kubernetes.io/scaling": ""},
+		},
+		Spec: v12.NodeSpec{Taints: []v12.Taint{{Key: "node-role.kubernetes.io/scaling", Effect: v12.TaintEffectNoSchedule}}},
+	})
+	controller := NewNodeScalingController(&NodeScalingRuntime{
+		Config:  NodeScalingConfig{RepoURL: "http://127.0.0.1:1/unavailable.git", RepoFilePath: defaultNodeScalingFile},
+		RepoDir: t.TempDir(),
+	}, client, store, time.Minute)
+
+	if err := controller.ReconcileScaleOut(ScaleOutRequest{Namespace: "default", Reason: "insufficient cpu"}); err != nil {
+		t.Fatalf("expected existing spare activation to succeed without Git, got %v", err)
+	}
+	node, err := client.CoreV1().Nodes().Get(context.TODO(), "node-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(node.Spec.Taints) != 0 {
+		t.Fatalf("expected spare taint to be removed despite Git failure, got %#v", node.Spec.Taints)
+	}
+	if !store.inventory.Spec.Nodes[0].Used {
+		t.Fatal("expected activated spare to be marked used")
+	}
+	if store.inventory.Spec.MachineDeploymentReplicas != 2 {
+		t.Fatalf("expected Git-backed replica count to remain unchanged, got %d", store.inventory.Spec.MachineDeploymentReplicas)
+	}
+}
+
 func TestNodeScalingControllerReconcileScaleOutActivatesMultiplePreparedSpares(t *testing.T) {
 	repoDir := t.TempDir()
 	writeFile(t, filepath.Join(repoDir, defaultNodeScalingFile), machineDeploymentYAML(3))
