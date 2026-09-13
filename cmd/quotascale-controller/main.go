@@ -8,6 +8,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SSU-DCN/quotascale-controller/internal/nodescaling"
@@ -18,6 +19,7 @@ import (
 	ichp "github.com/SSU-DCN/quotascale-controller/pkg/scalerclient/client/clientset/versioned"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -121,19 +123,46 @@ func main() {
 			panic(err)
 		}
 
-		// FailedCreate events let the quota controller react immediately when workload creation is denied by quota.
-		eventWatch, err := client.CoreV1().Events("").Watch(context.TODO(), v1.ListOptions{TimeoutSeconds: &watchTimeoutSec, FieldSelector: "reason=FailedCreate"})
+		// Quota-denied creation and scheduler capacity failures are distinct
+		// Kubernetes Event reasons. Watch both and merge them for the controller.
+		failedCreateWatch, err := client.CoreV1().Events("").Watch(context.TODO(), v1.ListOptions{TimeoutSeconds: &watchTimeoutSec, FieldSelector: "reason=FailedCreate"})
 		if err != nil {
 			panic(err)
 		}
+		failedSchedulingWatch, err := client.CoreV1().Events("").Watch(context.TODO(), v1.ListOptions{TimeoutSeconds: &watchTimeoutSec, FieldSelector: "reason=FailedScheduling"})
+		if err != nil {
+			failedCreateWatch.Stop()
+			panic(err)
+		}
+		events := mergeWatchEvents(failedCreateWatch, failedSchedulingWatch)
 
 		// Blocking call until stream watch timeout
-		quotaController.Run(startScalerState.Items, quotaWatch.ResultChan(), scalerWatch.ResultChan(), eventWatch.ResultChan())
+		quotaController.Run(startScalerState.Items, quotaWatch.ResultChan(), scalerWatch.ResultChan(), events)
 
 		scalerWatch.Stop()
 		quotaWatch.Stop()
-		eventWatch.Stop()
+		failedCreateWatch.Stop()
+		failedSchedulingWatch.Stop()
 	}
+}
+
+func mergeWatchEvents(watches ...watch.Interface) <-chan watch.Event {
+	merged := make(chan watch.Event)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(watches))
+	for _, source := range watches {
+		go func(source watch.Interface) {
+			defer waitGroup.Done()
+			for event := range source.ResultChan() {
+				merged <- event
+			}
+		}(source)
+	}
+	go func() {
+		waitGroup.Wait()
+		close(merged)
+	}()
+	return merged
 }
 
 func exitIfQuotaAutoscalerCRDMissing(err error) {
