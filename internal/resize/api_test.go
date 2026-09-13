@@ -76,7 +76,7 @@ func TestRunEventHandler(t *testing.T) {
 func TestResourceQuotaPatchSetsRequestsAndLimitsToDesiredResources(t *testing.T) {
 	var patch struct {
 		Spec struct {
-			Hard map[string]string `json:"hard"`
+			Hard map[string]interface{} `json:"hard"`
 		} `json:"spec"`
 	}
 
@@ -95,6 +95,12 @@ func TestResourceQuotaPatchSetsRequestsAndLimitsToDesiredResources(t *testing.T)
 	for key, value := range expected {
 		if patch.Spec.Hard[key] != value {
 			t.Fatalf("expected %s to be %s, got %s", key, value, patch.Spec.Hard[key])
+		}
+	}
+	for _, legacyKey := range []string{"cpu", "memory"} {
+		value, exists := patch.Spec.Hard[legacyKey]
+		if !exists || value != nil {
+			t.Fatalf("expected legacy key %s to be explicitly removed with null, got %#v", legacyKey, value)
 		}
 	}
 }

@@ -237,7 +237,7 @@ func InvokeResizeApiStub(ns NamespaceResizeEvent) error {
 }
 
 func ResourceQuotaPatch(res resources.Resources) []byte {
-	return []byte(fmt.Sprintf("{\"spec\": {\"hard\": {\"requests.cpu\": \"%dm\", \"limits.cpu\": \"%dm\", \"requests.memory\": \"%dM\", \"limits.memory\": \"%dM\"}}}",
+	return []byte(fmt.Sprintf("{\"spec\": {\"hard\": {\"cpu\": null, \"memory\": null, \"requests.cpu\": \"%dm\", \"limits.cpu\": \"%dm\", \"requests.memory\": \"%dM\", \"limits.memory\": \"%dM\"}}}",
 		res.RequestsCpu, res.Cpu,
 		res.RequestsMemory, res.Memory,
 	))
